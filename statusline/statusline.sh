@@ -135,8 +135,14 @@ bar() {
 sep=" ${DIM}│${R} "
 sep_plain=" │ "
 
-# ── Detect terminal width ────────────────────────────────────────
-cols=$(tput cols 2>/dev/null || echo 120)
+# ── Terminal width (from monitor API, fallback no-wrap) ──────────
+# tput cols is unreliable in pipe context (always 80).
+# Monitor detects actual window width via Win32 API.
+api_cols=""
+if [[ -n "$resp" ]] && [[ "$resp" =~ \"cols\":([0-9]+) ]]; then
+  api_cols="${BASH_REMATCH[1]}"
+fi
+cols=${api_cols:-9999}
 
 # ── Build all enabled items (always full content) ────────────────
 items=()       # array of ANSI-colored segments

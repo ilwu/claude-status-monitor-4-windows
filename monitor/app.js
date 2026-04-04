@@ -58,6 +58,7 @@ function getDisplay() {
 // ── State ────────────────────────────────────────────────────────────
 const store = new Map(); // pid -> { mem, updatedAt }
 let systemMemPct = null;
+const windowCols = new Map(); // pid -> estimated terminal columns
 
 // ── Icon: 16x16 orange circle (#D97757) ──────────────────────────────
 function generateIconBase64() {
@@ -154,6 +155,72 @@ function collect() {
       }
     }
   );
+
+  // Terminal window width per session (walk parent chain to find terminal host)
+  collectWindowCols();
+}
+
+// Write the window-cols PowerShell script once on startup
+const COLS_SCRIPT = path.join(CONFIG_DIR, 'get-cols.ps1');
+
+function ensureColsScript() {
+  const script = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class W32 {
+  [DllImport("user32.dll")]
+  public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  public struct RECT { public int L, T, R, B; }
+}
+"@
+function GW($s) {
+  $p = $s
+  for ($i = 0; $i -lt 10; $i++) {
+    try {
+      $pr = Get-Process -Id $p -EA Stop
+      if ($pr.MainWindowHandle -ne [IntPtr]::Zero) {
+        $r = New-Object W32+RECT
+        [W32]::GetWindowRect($pr.MainWindowHandle, [ref]$r) | Out-Null
+        return [math]::Floor(($r.R - $r.L) / 8)
+      }
+      $w = Get-WmiObject Win32_Process -Filter "ProcessId=$p" -EA Stop
+      $p = $w.ParentProcessId
+      if ($p -eq 0) { return 0 }
+    } catch { return 0 }
+  }
+  return 0
+}
+$args | ForEach-Object { Write-Host "$_,$(GW $_)" }
+`.trim();
+  try {
+    if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    fs.writeFileSync(COLS_SCRIPT, script);
+  } catch {}
+}
+
+function collectWindowCols() {
+  const pids = [...store.keys()];
+  if (pids.length === 0) return;
+
+  const pidArgs = pids.join(' ');
+  exec(
+    `powershell -NoProfile -File "${COLS_SCRIPT}" ${pidArgs}`,
+    { timeout: 8000 },
+    (err, stdout) => {
+      if (err) return;
+      for (const line of stdout.split('\n')) {
+        const [pidStr, colsStr] = line.trim().split(',');
+        const pid = parseInt(pidStr), cols = parseInt(colsStr);
+        if (!isNaN(pid) && !isNaN(cols) && cols > 0) {
+          windowCols.set(pid, cols);
+        }
+      }
+      for (const pid of windowCols.keys()) {
+        if (!store.has(pid)) windowCols.delete(pid);
+      }
+    }
+  );
 }
 
 // ── HTTP API ─────────────────────────────────────────────────────────
@@ -173,10 +240,12 @@ const server = http.createServer((req, res) => {
     const d = store.get(parseInt(m[1]));
     let claudeTotal = 0;
     for (const v of store.values()) claudeTotal += v.mem;
+    const reqPid = parseInt(m[1]);
     return res.end(JSON.stringify({
       ...(d || { mem: null }),
       claude_total: claudeTotal,
       system_pct: systemMemPct,
+      cols: windowCols.get(reqPid) || null,
       display: getDisplay(),
     }));
   }
@@ -286,7 +355,8 @@ async function startTray() {
 
 // ── Main ─────────────────────────────────────────────────────────────
 loadConfig();
-saveConfig(); // persist defaults on first run
+saveConfig();
+ensureColsScript();
 
 server.listen(PORT, '127.0.0.1', async () => {
   console.log(`Claude Monitor  http://127.0.0.1:${PORT}`);
