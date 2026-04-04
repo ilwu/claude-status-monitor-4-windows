@@ -1,0 +1,12 @@
+{
+  "name": "claude-status-monitor",
+  "version": "1.0.0",
+  "description": "System tray monitor for Claude Code session memory on Windows",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "systray2": "^2.1.4"
+  }
+}
