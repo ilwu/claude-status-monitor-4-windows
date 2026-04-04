@@ -11,11 +11,8 @@ input=$(cat)
 [[ "$input" =~ \"display_name\":\"([^\"]+)\" ]]           && model="${BASH_REMATCH[1]}"
 [[ "$input" =~ \"total_cost_usd\":([0-9.]+) ]]           && cost="${BASH_REMATCH[1]}"
 
-# ── Format project path ─────────────────────────────────────────
+# ── Format project path (keep full path, just fix slashes) ───────
 proj="${proj//\\\\/\/}"
-if   [[ "$proj" =~ ^[Cc]:/workspace(.*) ]]; then proj="~${BASH_REMATCH[1]}"
-elif [[ "$proj" =~ ^[Cc]:/Users/[^/]+(.*) ]]; then proj="~${BASH_REMATCH[1]}"
-fi
 proj="${proj%/}"
 [[ -z "$proj" ]] && proj="~"
 
