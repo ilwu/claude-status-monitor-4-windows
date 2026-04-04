@@ -6,7 +6,7 @@ Per-session memory monitoring for [Claude Code](https://docs.anthropic.com/en/do
 
 **Know which session to close when your system gets slow.**
 
-<!-- ![screenshot](screenshots/preview.png) -->
+![screenshot](screenshots/social-preview.png)
 
 ## The Problem
 

@@ -6,7 +6,7 @@
 
 **系統變慢時，一眼看出該關哪個 session。**
 
-<!-- ![screenshot](screenshots/preview.png) -->
+![screenshot](screenshots/social-preview.png)
 
 ## 問題
 
