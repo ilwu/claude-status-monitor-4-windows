@@ -145,7 +145,7 @@ fi
 
 if has claude_mem; then
   [[ -n "$out" ]] && out+="${sep}"
-  out+="${CYN}Claude${R} ${sess_fmt}/${DIM}${cld_fmt}${R}"
+  out+="${CYN}Claude${R} ${sess_fmt}/${DIM}${cld_fmt} (session/total)${R}"
 fi
 
 if has ctx; then

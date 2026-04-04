@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1280px; height: 640px;
+    background: linear-gradient(135deg, #1a1b26 0%, #24283b 50%, #1a1b26 100%);
+    font-family: 'Segoe UI', 'Cascadia Code', monospace;
+    color: #c0caf5;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+  }
+  .title {
+    font-size: 52px;
+    font-weight: 700;
+    color: #ff9e64;
+    margin-bottom: 12px;
+    letter-spacing: -1px;
+  }
+  .subtitle {
+    font-size: 26px;
+    color: #7aa2f7;
+    margin-bottom: 48px;
+  }
+  .statusline {
+    background: #16161e;
+    border: 1px solid #3b4261;
+    border-radius: 8px;
+    padding: 16px 32px;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    font-size: 20px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: nowrap;
+  }
+  .sep { color: #3b4261; }
+  .green { color: #9ece6a; }
+  .yellow { color: #e0af68; }
+  .red { color: #f7768e; }
+  .cyan { color: #7dcfff; }
+  .blue { color: #7aa2f7; }
+  .magenta { color: #bb9af7; }
+  .dim { color: #565f89; }
+  .bar-filled-green { color: #9ece6a; letter-spacing: -2px; }
+  .bar-filled-red { color: #f7768e; letter-spacing: -2px; }
+  .bar-empty { color: #3b4261; letter-spacing: -2px; }
+  .tagline {
+    margin-top: 40px;
+    font-size: 22px;
+    color: #565f89;
+  }
+  .windows {
+    color: #7aa2f7;
+    font-weight: 600;
+  }
+</style>
+</head>
+<body>
+  <div class="title">Claude Status Monitor for Windows</div>
+  <div class="subtitle">Per-session memory monitoring for Claude Code on <span class="windows">Windows</span></div>
+
+  <div class="statusline">
+    <span><span class="green">Sys</span> <span class="bar-filled-green">▊▊▊▊▊</span><span class="bar-empty">░░░░░</span> <span class="green">57%</span></span>
+    <span class="sep">│</span>
+    <span><span class="cyan">Claude</span> 1.0G/<span class="dim">1.3G</span></span>
+    <span class="sep">│</span>
+    <span>Ctx <span class="bar-filled-green">▊</span><span class="bar-empty">░░░░░░░░░</span> 13%</span>
+    <span class="sep">│</span>
+    <span><span class="red">Week</span> <span class="bar-filled-red">▊▊▊▊▊▊▊▊▊</span><span class="bar-empty">░</span> <span class="red">95%</span></span>
+    <span class="sep">│</span>
+    <span><span class="magenta">Opus 4.6</span></span>
+    <span class="sep">│</span>
+    <span><span class="yellow">$21.34</span></span>
+  </div>
+
+  <div class="tagline">Know which session to close when your system gets slow.</div>
+</body>
+</html>

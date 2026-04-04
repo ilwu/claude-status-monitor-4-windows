@@ -4,27 +4,23 @@
 
 在 Windows 上監控每個 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) session 的記憶體用量。
 
-**系統變慢時，一眼看出該關哪個 session。**
-
 ![screenshot](screenshots/social-preview.png)
 
 ## 問題
 
-在 Windows 上同時開多個 Claude Code session，系統記憶體很快就被吃滿。但你無法分辨哪個 session 是記憶體怪獸 — 只能猜，或打開工作管理員手動比對 PID。
+你同時開了 3-4 個 Claude Code session，系統越來越慢。打開工作管理員 — 全部都叫 `claude.exe`，根本分不出誰吃了多少記憶體。
 
 ## 解決方案
 
-一個輕量的系統工具列小程式：
-
-- 追蹤**每個 Claude Code session** 的記憶體用量
-- 即時資料顯示在 Claude Code 的 **statusline**（底部狀態列）
-- 用顏色標示警告，讓你立刻知道哪裡有問題
-- 常駐系統工具列 — 不是幽靈進程，右鍵就能退出
-
 ```
-Sys ▊▊▊▊▊░░░░░ 57% │ Claude 1.0G/1.3G │ Ctx ▊░░░░░░░░░ 13% │ Week ▊▊▊▊▊▊▊▊▊░ 95% │ ...
-    ^^^^^ 綠色                                                       ^^^^^ 紅色 = 警告
+Claude 812M/1.5G (session/total)
+       ↑              ↑
+   這個 session    全部 session
 ```
+
+**這是核心功能。** 每個 Claude Code session 的狀態列直接顯示「這個 session 吃了多少 / 全部共多少」。看到哪個特別大？關掉它。問題解決。
+
+其他功能 — 系統記憶體 %、Context 用量、本週用量、模型名稱、花費 — 都是額外資訊，可以從系統工具列自由開關。
 
 ## 為什麼需要獨立小工具？直接寫在 shell script 不行嗎？
 

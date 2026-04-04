@@ -4,27 +4,23 @@
 
 Per-session memory monitoring for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) on Windows.
 
-**Know which session to close when your system gets slow.**
-
 ![screenshot](screenshots/social-preview.png)
 
 ## The Problem
 
-When running multiple Claude Code sessions on Windows, system memory fills up fast. But there's no built-in way to see which session is the memory hog. You're left guessing, or opening Task Manager and trying to match PIDs.
+You're running 3-4 Claude Code sessions on Windows. System gets slow. You open Task Manager — all you see is multiple `claude.exe` processes. Which one is eating all the memory? No way to tell.
 
 ## The Solution
 
-A lightweight system tray app that:
-
-- Tracks memory usage for **each Claude Code session** individually
-- Feeds real-time data to Claude Code's **statusline** (the bar at the bottom)
-- Shows color-coded warnings so you know when to act
-- Lives in your system tray — not a ghost process
-
 ```
-Sys ▊▊▊▊▊░░░░░ 57% │ Claude 1.0G/1.3G │ Ctx ▊░░░░░░░░░ 13% │ Week ▊▊▊▊▊▊▊▊▊░ 95% │ ...
-    ^^^^^ green                                                      ^^^^^ red = warning
+Claude 812M/1.5G (session/total)
+       ↑              ↑
+  This session    All sessions
 ```
+
+**This is the core.** Each Claude Code session's statusline shows how much memory *this session* uses vs. the total across all sessions. See a heavy one? Close it. Problem solved.
+
+Everything else — system memory %, context window, weekly usage, model name, cost — is bonus info you can toggle on/off from the system tray.
 
 ## Why a Separate Service? Why Not Just a Shell Script?
 
