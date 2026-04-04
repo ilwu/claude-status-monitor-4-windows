@@ -132,100 +132,85 @@ bar() {
   echo -ne "$s"
 }
 
-sep="${DIM} │ ${R}"
+sep=" ${DIM}│${R} "
+sep_plain=" │ "
 
-# ── Detect width for responsive layout ───────────────────────────
+# ── Detect terminal width ────────────────────────────────────────
 cols=$(tput cols 2>/dev/null || echo 120)
 
-# Responsive modes:
-#   full    (>=160): progress bars + all labels
-#   compact (>=120): no bars, short labels
-#   core    (>=80):  claude_mem + ctx + session_id only
-#   minimal (<80):   claude_mem only
+# ── Build all enabled items (always full content) ────────────────
+items=()       # array of ANSI-colored segments
+items_len=()   # array of visible lengths (no ANSI)
 
-# ── Dynamic output ───────────────────────────────────────────────
-out=""
-add() { [[ -n "$out" ]] && out+="${sep}"; out+="$1"; }
+add_item() {
+  local colored="$1" plain="$2"
+  items+=("$colored")
+  items_len+=("${#plain}")
+}
 
-if ((cols >= 160)); then
-  # ── Full mode ──────────────────────────────────────────────────
-  if has sys_mem; then
-    sys_c=$(pct_color "${sys_pct:-0}")
-    add "${sys_c}Sys${R} $(bar "${sys_pct:-0}") ${sys_c}${sys_pct:-?}%${R}"
-  fi
-  if has claude_mem; then
-    add "${CYN}Claude${R} ${sess_fmt}/${DIM}${cld_fmt} (session/total)${R}"
-  fi
-  if has ctx; then
-    add "Ctx $(bar "${ctx:-0}") ${ctx:-?}%"
-  fi
-  if has week; then
-    week_c=$(pct_color "${week:-0}")
-    add "${week_c}Week${R} $(bar "${week:-0}") ${week_c}${week:-?}%${R}"
-  fi
-  if has model; then
-    add "${MAG}${model:-?}${R}"
-  fi
-  if has cost; then
-    if [[ -n "$cost" && "$cost" != "0" ]]; then
-      cost_int="${cost%%.*}"; cost_dec="${cost#*.}"; cost_dec="${cost_dec:0:2}"
-      add "${YLW}\$$cost_int.$cost_dec${R}"
-    fi
-  fi
-  if has session_id; then add "${DIM}${sid:-?}${R}"; fi
-  if has path; then add "${BLU}${proj}${R}"; fi
-
-elif ((cols >= 120)); then
-  # ── Compact mode: no bars, shorter labels ──────────────────────
-  if has sys_mem; then
-    sys_c=$(pct_color "${sys_pct:-0}")
-    add "${sys_c}Sys ${sys_pct:-?}%${R}"
-  fi
-  if has claude_mem; then
-    add "${CYN}Claude${R} ${sess_fmt}/${DIM}${cld_fmt}${R}"
-  fi
-  if has ctx; then
-    ctx_c=$(pct_color "${ctx:-0}")
-    add "${ctx_c}Ctx ${ctx:-?}%${R}"
-  fi
-  if has week; then
-    week_c=$(pct_color "${week:-0}")
-    add "${week_c}Wk ${week:-?}%${R}"
-  fi
-  if has model; then
-    # Shorten model name
-    short_model="${model%% (*}"
-    add "${MAG}${short_model:-?}${R}"
-  fi
-  if has cost; then
-    if [[ -n "$cost" && "$cost" != "0" ]]; then
-      cost_int="${cost%%.*}"; cost_dec="${cost#*.}"; cost_dec="${cost_dec:0:2}"
-      add "${YLW}\$$cost_int.$cost_dec${R}"
-    fi
-  fi
-  if has session_id; then add "${DIM}${sid:0:8}${R}"; fi
-  if has path; then add "${BLU}${proj}${R}"; fi
-
-elif ((cols >= 80)); then
-  # ── Core mode: essential items only ────────────────────────────
-  if has claude_mem; then
-    add "${CYN}Claude${R} ${sess_fmt}/${DIM}${cld_fmt}${R}"
-  fi
-  if has ctx; then
-    ctx_c=$(pct_color "${ctx:-0}")
-    add "${ctx_c}Ctx ${ctx:-?}%${R}"
-  fi
-  if has week; then
-    week_c=$(pct_color "${week:-0}")
-    add "${week_c}Wk ${week:-?}%${R}"
-  fi
-  if has session_id; then add "${DIM}${sid:0:8}${R}"; fi
-
-else
-  # ── Minimal mode: just memory ──────────────────────────────────
-  if has claude_mem; then
-    add "${CYN}Claude${R} ${sess_fmt}/${DIM}${cld_fmt}${R}"
+if has sys_mem; then
+  sys_c=$(pct_color "${sys_pct:-0}")
+  add_item "${sys_c}Sys${R} $(bar "${sys_pct:-0}") ${sys_c}${sys_pct:-?}%${R}" "Sys ▊▊▊▊▊░░░░░ ${sys_pct:-?}%"
+fi
+if has claude_mem; then
+  add_item "${CYN}Claude${R} ${sess_fmt}/${DIM}${cld_fmt} (session/total)${R}" "Claude ${sess_fmt}/${cld_fmt} (session/total)"
+fi
+if has ctx; then
+  add_item "Ctx $(bar "${ctx:-0}") ${ctx:-?}%" "Ctx ▊▊▊▊▊░░░░░ ${ctx:-?}%"
+fi
+if has week; then
+  week_c=$(pct_color "${week:-0}")
+  add_item "${week_c}Week${R} $(bar "${week:-0}") ${week_c}${week:-?}%${R}" "Week ▊▊▊▊▊░░░░░ ${week:-?}%"
+fi
+if has model; then
+  add_item "${MAG}${model:-?}${R}" "${model:-?}"
+fi
+if has cost; then
+  if [[ -n "$cost" && "$cost" != "0" ]]; then
+    cost_int="${cost%%.*}"; cost_dec="${cost#*.}"; cost_dec="${cost_dec:0:2}"
+    add_item "${YLW}\$$cost_int.$cost_dec${R}" "\$$cost_int.$cost_dec"
   fi
 fi
+if has session_id; then
+  add_item "${DIM}${sid:-?}${R}" "${sid:-?}"
+fi
+if has path; then
+  add_item "${BLU}${proj}${R}" "${proj}"
+fi
 
-echo -e "$out"
+# ── Auto-wrap: pack items into lines that fit terminal width ─────
+sep_len=3  # " │ " = 3 chars
+lines=()
+cur_line=""
+cur_len=0
+
+for i in "${!items[@]}"; do
+  item_len=${items_len[$i]}
+  # Calculate width if we add this item to current line
+  if ((cur_len == 0)); then
+    need=$item_len
+  else
+    need=$((cur_len + sep_len + item_len))
+  fi
+
+  if ((need <= cols)) || ((cur_len == 0)); then
+    # Fits on current line (or first item on line — always add)
+    if ((cur_len > 0)); then
+      cur_line+="${sep}"
+      cur_len=$((cur_len + sep_len))
+    fi
+    cur_line+="${items[$i]}"
+    cur_len=$((cur_len + item_len))
+  else
+    # Doesn't fit — start new line
+    lines+=("$cur_line")
+    cur_line="${items[$i]}"
+    cur_len=$item_len
+  fi
+done
+[[ -n "$cur_line" ]] && lines+=("$cur_line")
+
+# ── Output all lines ─────────────────────────────────────────────
+for line in "${lines[@]}"; do
+  echo -e "$line"
+done
