@@ -26,6 +26,44 @@ Sys ▊▊▊▊▊░░░░░ 57% │ Claude 1.0G/1.3G │ Ctx ▊░░░
     ^^^^^ green                                                      ^^^^^ red = warning
 ```
 
+## Why a Separate Service? Why Not Just a Shell Script?
+
+Good question. We tried that first. Here's why it doesn't work on Windows:
+
+**Claude Code's statusline has a ~500ms timeout.** If your script doesn't finish in time, nothing shows.
+
+On Windows, every process spawn is expensive:
+
+| Operation | Time |
+|-----------|------|
+| `wmic` query (1 call) | ~150-300ms |
+| `curl` to localhost | ~650ms (process spawn overhead) |
+| `cat` via pipe | ~230ms |
+| `bash` startup + pipe | ~250ms |
+
+To display per-session memory, the statusline script would need to:
+
+1. Walk the parent process chain to find which `claude.exe` owns this session — **multiple `wmic` calls, ~300ms each**
+2. Query that process's memory — **another `wmic` call, ~150ms**
+3. Query system memory — **another `wmic` call, ~150ms**
+
+**Total: easily 1-2 seconds. Way over the 500ms limit.**
+
+### Our solution: split the work
+
+| | Heavy work (background) | Statusline (fast path) |
+|---|---|---|
+| **Who** | Tray app (Node.js) | Bash script |
+| **When** | Every 5 seconds | On each assistant reply |
+| **What** | `wmic` queries for all sessions | `/dev/tcp` to localhost |
+| **Time** | ~300ms (doesn't matter) | **~60ms** (well under 500ms) |
+
+The tray app does the slow `wmic` work in the background and caches results. The statusline just reads cached data via a fast local HTTP call (`/dev/tcp`, no `curl` spawn). First call caches the PID, subsequent calls are ~60ms.
+
+**Bonus:** the tray app also gives us a visible process (not a ghost), configurable items via right-click menu, and a clean way to start/stop.
+
+> **On macOS/Linux** this architecture wouldn't be necessary — process queries are fast and the statusline script could do everything inline. This is a Windows-specific solution for Windows-specific problems.
+
 ## Features
 
 - **Per-session memory** — See exactly how much each Claude session uses

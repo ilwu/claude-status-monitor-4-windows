@@ -26,6 +26,44 @@ Sys ▊▊▊▊▊░░░░░ 57% │ Claude 1.0G/1.3G │ Ctx ▊░░░
     ^^^^^ 綠色                                                       ^^^^^ 紅色 = 警告
 ```
 
+## 為什麼需要獨立小工具？直接寫在 shell script 不行嗎？
+
+好問題。我們一開始就是這樣做的，然後踩了一堆坑。
+
+**Claude Code 的 statusline 有 ~500ms 的超時限制。** 腳本跑不完就什麼都不顯示。
+
+在 Windows 上，每次啟動進程都很貴：
+
+| 操作 | 耗時 |
+|------|------|
+| `wmic` 查詢（1 次） | ~150-300ms |
+| `curl` 打 localhost | ~650ms（進程啟動開銷） |
+| `cat` 透過 pipe | ~230ms |
+| `bash` 啟動 + pipe | ~250ms |
+
+要在 statusline 顯示 per-session 記憶體，腳本需要：
+
+1. 走 parent process chain 找到這個 session 的 `claude.exe` — **多次 `wmic` 呼叫，每次 ~300ms**
+2. 查詢該進程的記憶體 — **又一次 `wmic`，~150ms**
+3. 查詢系統記憶體 — **再一次 `wmic`，~150ms**
+
+**加起來輕鬆 1-2 秒，遠超 500ms 限制。**
+
+### 我們的解法：拆分工作
+
+| | 重活（背景執行） | Statusline（快速路徑） |
+|---|---|---|
+| **誰** | 工具列小程式 (Node.js) | Bash 腳本 |
+| **何時** | 每 5 秒 | 每次 assistant 回覆 |
+| **做什麼** | `wmic` 查詢所有 session | `/dev/tcp` 打 localhost |
+| **耗時** | ~300ms（不影響） | **~60ms**（遠低於 500ms） |
+
+小工具在背景做耗時的 `wmic` 查詢並快取結果。Statusline 只需透過 `/dev/tcp`（不啟動 `curl` 進程）讀取快取資料。首次呼叫會快取 PID，之後每次只要 ~60ms。
+
+**額外好處：** 小工具還提供了可見的進程（不是幽靈進程）、右鍵選單可切換顯示項目、以及乾淨的啟動/停止方式。
+
+> **在 macOS/Linux 上**不需要這種架構 — 進程查詢很快，statusline 腳本自己就能搞定。這是針對 Windows 特有問題的 Windows 專屬解決方案。
+
 ## 功能
 
 - **Per-session 記憶體** — 精確顯示每個 session 的用量
