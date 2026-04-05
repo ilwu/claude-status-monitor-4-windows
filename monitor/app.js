@@ -23,6 +23,8 @@ const ITEMS = [
   { id: 'path',       label: 'Project Path',     default: true  },
   { id: 'model',      label: 'Model Name',       default: false },
   { id: 'cost',       label: 'Session Cost ($)', default: false },
+  { id: 'lines',      label: 'Lines +/-',        default: false },
+  { id: 'duration',   label: 'Session Duration',  default: false },
 ];
 
 // ── Config ───────────────────────────────────────────────────────────

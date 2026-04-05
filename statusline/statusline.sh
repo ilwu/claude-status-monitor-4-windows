@@ -10,6 +10,9 @@ input=$(cat)
 [[ "$input" =~ seven_day.*used_percentage\":([0-9]+) ]]  && week="${BASH_REMATCH[1]}"
 [[ "$input" =~ \"display_name\":\"([^\"]+)\" ]]           && model="${BASH_REMATCH[1]}"
 [[ "$input" =~ \"total_cost_usd\":([0-9.]+) ]]           && cost="${BASH_REMATCH[1]}"
+[[ "$input" =~ \"total_lines_added\":([0-9]+) ]]         && lines_add="${BASH_REMATCH[1]}"
+[[ "$input" =~ \"total_lines_removed\":([0-9]+) ]]       && lines_del="${BASH_REMATCH[1]}"
+[[ "$input" =~ \"total_duration_ms\":([0-9]+) ]]         && duration_ms="${BASH_REMATCH[1]}"
 
 # ── Format project path (keep full path, just fix slashes) ───────
 proj="${proj//\\\\/\/}"
@@ -175,6 +178,22 @@ if has cost; then
   if [[ -n "$cost" && "$cost" != "0" ]]; then
     cost_int="${cost%%.*}"; cost_dec="${cost#*.}"; cost_dec="${cost_dec:0:2}"
     add_item "${YLW}\$$cost_int.$cost_dec${R}" "\$$cost_int.$cost_dec"
+  fi
+fi
+if has lines; then
+  la="${lines_add:-0}"; ld="${lines_del:-0}"
+  add_item "${GRN}+${la}${R}/${RED}-${ld}${R}" "+${la}/-${ld}"
+fi
+if has duration; then
+  if [[ -n "$duration_ms" && "$duration_ms" != "0" ]]; then
+    total_s=$((duration_ms / 1000))
+    hrs=$((total_s / 3600)); mins=$(( (total_s % 3600) / 60 ))
+    if ((hrs > 0)); then
+      dur_fmt="${hrs}h${mins}m"
+    else
+      dur_fmt="${mins}m"
+    fi
+    add_item "${DIM}${dur_fmt}${R}" "${dur_fmt}"
   fi
 fi
 if has session_id; then
