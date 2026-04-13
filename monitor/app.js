@@ -17,6 +17,7 @@ const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 const ITEMS = [
   { id: 'sys_mem',    label: 'System Memory',    default: true  },
   { id: 'claude_mem', label: 'Claude Memory',    default: true  },
+  { id: 'mcp_mem',   label: 'MCP Memory',       default: true  },
   { id: 'ctx',        label: 'Context Window',   default: true  },
   { id: 'week',       label: 'Weekly Usage',     default: true  },
   { id: 'session_id', label: 'Session ID',       default: true  },
@@ -60,6 +61,8 @@ function getDisplay() {
 // ── State ────────────────────────────────────────────────────────────
 const store = new Map(); // pid -> { mem, updatedAt }
 let systemMemPct = null;
+let mcpMemTotal = 0; // total MCP server memory in bytes
+let mcpProcCount = 0; // number of MCP server processes
 const windowCols = new Map(); // pid -> estimated terminal columns
 
 // ── Icon: 16x16 orange circle (#D97757) ──────────────────────────────
@@ -158,6 +161,24 @@ function collect() {
     }
   );
 
+  // MCP server processes (node.exe with *-mcp* in command line)
+  exec(
+    'wmic process where "name=\'node.exe\' AND CommandLine LIKE \'%-mcp%\'" get WorkingSetSize /FORMAT:CSV',
+    { timeout: 4000 },
+    (err, stdout) => {
+      if (err) return;
+      let total = 0, count = 0;
+      for (const line of stdout.split('\n')) {
+        const parts = line.trim().split(',');
+        if (parts.length < 2 || parts[1] === 'WorkingSetSize') continue;
+        const ws = parseInt(parts[1]);
+        if (!isNaN(ws) && ws > 0) { total += ws; count++; }
+      }
+      mcpMemTotal = total;
+      mcpProcCount = count;
+    }
+  );
+
   // Terminal window width per session (walk parent chain to find terminal host)
   collectWindowCols();
 }
@@ -247,6 +268,8 @@ const server = http.createServer((req, res) => {
       ...(d || { mem: null }),
       claude_total: claudeTotal,
       system_pct: systemMemPct,
+      mcp_total: mcpMemTotal,
+      mcp_count: mcpProcCount,
       cols: windowCols.get(reqPid) || null,
       display: getDisplay(),
     }));

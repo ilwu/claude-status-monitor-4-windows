@@ -64,11 +64,13 @@ if [[ -n "$my_pid" ]]; then
 fi
 
 # Parse API response
-sys_pct="" cld_total="" sess_mem="" display=""
+sys_pct="" cld_total="" sess_mem="" mcp_total="" mcp_count="" display=""
 if [[ -n "$resp" ]]; then
   [[ "$resp" =~ \"system_pct\":([0-9]+) ]]    && sys_pct="${BASH_REMATCH[1]}"
   [[ "$resp" =~ \"claude_total\":([0-9]+) ]]   && cld_total="${BASH_REMATCH[1]}"
   [[ "$resp" =~ \"mem\":([0-9]+) ]]            && sess_mem="${BASH_REMATCH[1]}"
+  [[ "$resp" =~ \"mcp_total\":([0-9]+) ]]      && mcp_total="${BASH_REMATCH[1]}"
+  [[ "$resp" =~ \"mcp_count\":([0-9]+) ]]      && mcp_count="${BASH_REMATCH[1]}"
   [[ "$resp" =~ \"display\":\[([^\]]*)\] ]]    && display="${BASH_REMATCH[1]}"
 fi
 
@@ -163,6 +165,13 @@ if has sys_mem; then
 fi
 if has claude_mem; then
   add_item "${CYN}Claude${R} ${sess_fmt}/${DIM}${cld_fmt} (session/total)${R}" "Claude ${sess_fmt}/${cld_fmt} (session/total)"
+fi
+if has mcp_mem; then
+  mcp_fmt=$(fmt "$mcp_total")
+  mc="${mcp_count:-0}"
+  if [[ "$mc" != "0" ]]; then
+    add_item "${MAG}MCP${R} ${mcp_fmt}${DIM}(${mc})${R}" "MCP ${mcp_fmt}(${mc})"
+  fi
 fi
 if has ctx; then
   add_item "Ctx $(bar "${ctx:-0}") ${ctx:-?}%" "Ctx ▊▊▊▊▊░░░░░ ${ctx:-?}%"
