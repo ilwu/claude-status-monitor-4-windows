@@ -3,17 +3,22 @@
 .SYNOPSIS
     One-click installer for Claude Status Monitor on Windows.
 .DESCRIPTION
-    - Installs npm dependencies
+    - Installs npm dependencies (includes better-sqlite3 for the Memory API)
     - Copies statusline script to ~/.claude/
     - Merges statusLine config into ~/.claude/settings.json
     - Creates startup shortcut for auto-launch
     - Starts the monitor
+    - Verifies the Memory API (/api/health) and prints CLI setup hints
+    Safe to re-run (idempotent): it stops any running monitor on port 19823,
+    refreshes installed files, and starts the new build.
 #>
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $monitorDir = Join-Path $scriptDir "monitor"
 $statuslineDir = Join-Path $scriptDir "statusline"
+$binDir = Join-Path $scriptDir "bin"
+$toolsDir = Join-Path $scriptDir "tools"
 $claudeDir = Join-Path $env:USERPROFILE ".claude"
 
 Write-Host ""
@@ -22,7 +27,7 @@ Write-Host "  ===================================" -ForegroundColor DarkGray
 Write-Host ""
 
 # ── Pre-checks ────────────────────────────────────────────────────
-Write-Host "[1/5] Checking prerequisites..." -ForegroundColor Yellow
+Write-Host "[1/6] Checking prerequisites..." -ForegroundColor Yellow
 
 # Node.js
 $node = Get-Command node -ErrorAction SilentlyContinue
@@ -61,7 +66,7 @@ if ($existing) {
 }
 
 # ── npm install ───────────────────────────────────────────────────
-Write-Host "[2/5] Installing dependencies..." -ForegroundColor Yellow
+Write-Host "[2/6] Installing dependencies..." -ForegroundColor Yellow
 Push-Location $monitorDir
 npm install --silent 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
@@ -74,7 +79,7 @@ Pop-Location
 Write-Host "  Dependencies installed" -ForegroundColor Green
 
 # ── Copy statusline ──────────────────────────────────────────────
-Write-Host "[3/5] Installing statusline..." -ForegroundColor Yellow
+Write-Host "[3/6] Installing statusline..." -ForegroundColor Yellow
 
 if (-not (Test-Path $claudeDir)) {
     New-Item -ItemType Directory -Path $claudeDir -Force | Out-Null
@@ -108,7 +113,7 @@ $settingsHash | ConvertTo-Json -Depth 10 | Set-Content $settingsFile -Encoding U
 Write-Host "  Updated settings.json" -ForegroundColor Green
 
 # ── Startup shortcut ─────────────────────────────────────────────
-Write-Host "[4/5] Creating startup shortcut..." -ForegroundColor Yellow
+Write-Host "[4/6] Creating startup shortcut..." -ForegroundColor Yellow
 
 $ws = New-Object -ComObject WScript.Shell
 $startup = $ws.SpecialFolders("Startup")
@@ -121,7 +126,7 @@ $shortcut.Save()
 Write-Host "  Shortcut created at: $shortcutPath" -ForegroundColor Green
 
 # ── Start monitor ────────────────────────────────────────────────
-Write-Host "[5/5] Starting monitor..." -ForegroundColor Yellow
+Write-Host "[5/6] Starting monitor..." -ForegroundColor Yellow
 
 $vbsPath = Join-Path $monitorDir "start.vbs"
 cscript //nologo $vbsPath
@@ -136,6 +141,29 @@ try {
     Write-Host "  WARNING: Monitor started but API not responding yet. It may need a moment." -ForegroundColor Yellow
 }
 
+# ── Memory API check + mmsg CLI info ──────────────────────────────
+Write-Host "[6/6] Verifying Memory API + setting up mmsg CLI..." -ForegroundColor Yellow
+
+$memoryApiOk = $false
+try {
+    $health = Invoke-RestMethod -Uri "http://127.0.0.1:19823/api/health" -TimeoutSec 3
+    if ($health.ok) {
+        Write-Host "  Memory API ready. DB: $($health.db_path)" -ForegroundColor Green
+        $memoryApiOk = $true
+    } else {
+        Write-Host "  WARNING: /api/health returned ok=false" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "  WARNING: /api/health not reachable yet — try again in a few seconds." -ForegroundColor Yellow
+}
+
+$mmsgCmd = Join-Path $binDir "mmsg.cmd"
+if (Test-Path $mmsgCmd) {
+    Write-Host "  mmsg CLI wrapper: $mmsgCmd" -ForegroundColor Green
+} else {
+    Write-Host "  WARNING: bin/mmsg.cmd missing — the mmsg CLI shortcut isn't available." -ForegroundColor Yellow
+}
+
 # ── Done ─────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "  Installation complete!" -ForegroundColor Green
@@ -145,6 +173,35 @@ Write-Host "    - Look for the orange circle icon in your system tray (bottom-ri
 Write-Host "    - Right-click it to toggle statusline items or exit"
 Write-Host "    - Open a Claude Code session to see the statusline"
 Write-Host "    - Monitor auto-starts on boot"
+
+if ($memoryApiOk) {
+    Write-Host ""
+    Write-Host "  Memory API + mmsg CLI:" -ForegroundColor Cyan
+    Write-Host "    1. Put the wrapper on PATH, e.g.:"
+    Write-Host "         setx PATH `"`$env:PATH;$binDir`"" -ForegroundColor DarkGray
+    Write-Host "       Or copy $mmsgCmd into a directory already on PATH."
+    Write-Host "    2. Try it:"
+    Write-Host "         mmsg help"
+    Write-Host "         mmsg topic-new --title=`"hello`""
+    Write-Host ""
+    Write-Host "  Optional UserPromptSubmit hook (reminds you to `mmsg snapshot` every 10 prompts):"
+    $hookScript = Join-Path $toolsDir "session-prompt-reminder.js"
+    $hookCmd = "node " + ($hookScript -replace '\\', '/')
+    Write-Host "    Add the following snippet to ~/.claude/settings.local.json:"
+    Write-Host ""
+    Write-Host "      {" -ForegroundColor DarkGray
+    Write-Host "        `"hooks`": {" -ForegroundColor DarkGray
+    Write-Host "          `"UserPromptSubmit`": [" -ForegroundColor DarkGray
+    Write-Host "            { `"matcher`": `"`"," -ForegroundColor DarkGray
+    Write-Host "              `"hooks`": [" -ForegroundColor DarkGray
+    Write-Host "                { `"type`": `"command`", `"command`": `"$hookCmd`" }" -ForegroundColor DarkGray
+    Write-Host "              ] }" -ForegroundColor DarkGray
+    Write-Host "          ]" -ForegroundColor DarkGray
+    Write-Host "        }" -ForegroundColor DarkGray
+    Write-Host "      }" -ForegroundColor DarkGray
+    Write-Host "    (Not installed automatically — it's a per-project / per-user decision.)"
+}
+
 Write-Host ""
 Write-Host "  To uninstall: .\uninstall.ps1" -ForegroundColor DarkGray
 Write-Host ""

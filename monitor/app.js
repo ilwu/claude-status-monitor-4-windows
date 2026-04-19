@@ -5,8 +5,11 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
+const db = require('./db');
+const api = require('./api');
+
 const PORT = 19823;
-const INTERVAL = 5000;
+const INTERVAL = 60000;
 const CONFIG_DIR = path.join(process.env.USERPROFILE || process.env.HOME, '.claude-monitor');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
@@ -248,6 +251,12 @@ function collectWindowCols() {
 
 // ── HTTP API ─────────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
+  // Memory API — /api/* handled by api.js (cross-platform, DB-backed).
+  // Falls through to legacy /status* routes when no /api route matches.
+  if (req.url && req.url.startsWith('/api/')) {
+    if (api.dispatch(req, res)) return;
+  }
+
   res.setHeader('Content-Type', 'application/json');
 
   // GET /status — all sessions
@@ -382,6 +391,13 @@ async function startTray() {
 loadConfig();
 saveConfig();
 ensureColsScript();
+
+try {
+  db.init();
+  console.log(`[db] ready  ${db.resolveDbPath()}`);
+} catch (e) {
+  console.error('[db] init failed:', e.message);
+}
 
 server.listen(PORT, '127.0.0.1', async () => {
   console.log(`Claude Monitor  http://127.0.0.1:${PORT}`);
