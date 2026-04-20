@@ -474,6 +474,91 @@ async function runTests() {
     assert.strictEqual(r.code, 2);
   });
 
+  // ── mmsg init (setup checklist) ────────────────────────────────
+  await step('mmsg init (tray up, no settings.json) → shows ✗ hooks + snippet', async () => {
+    const initHome = fs.mkdtempSync(path.join(os.tmpdir(), 'minitor-init-'));
+    const child = spawn(process.execPath, [CLI_PATH, 'init'], {
+      env: {
+        ...process.env,
+        MINITOR_PORT: String(server.address().port),
+        MINITOR_RULES_DIR: rulesDir,
+        USERPROFILE: initHome,
+        HOME: initHome,
+        ANTHROPIC_API_KEY: '',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const out = [];
+    child.stdout.on('data', c => out.push(c));
+    const code = await new Promise(res => child.on('close', res));
+    assert.strictEqual(code, 0, 'init always exits 0 so scripts can parse');
+    const stdout = Buffer.concat(out).toString('utf8');
+    assert.match(stdout, /Minitor multi-session setup checklist/);
+    assert.match(stdout, /\[1\/5\] Tray app\s+✓/);
+    assert.match(stdout, /\[3\/5\] Phase 7 hooks\s+✗/);
+    assert.match(stdout, /\[5\/5\] Rules discoverable ✓/);
+    assert.match(stdout, /Hook snippet for ~\/\.claude\/settings\.json/);
+    assert.match(stdout, /hook-forward\.sh/);
+    fs.rmSync(initHome, { recursive: true, force: true });
+  });
+
+  await step('mmsg init (tray down) → shows ✗ tray', async () => {
+    const child = spawn(process.execPath, [CLI_PATH, 'init'], {
+      env: {
+        ...process.env,
+        MINITOR_PORT: '1',  // unreachable
+        MINITOR_RULES_DIR: rulesDir,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const out = [];
+    child.stdout.on('data', c => out.push(c));
+    const code = await new Promise(res => child.on('close', res));
+    assert.strictEqual(code, 0, 'init stays exit 0 even when tray is down');
+    const stdout = Buffer.concat(out).toString('utf8');
+    assert.match(stdout, /\[1\/5\] Tray app\s+✗/);
+    assert.match(stdout, /unreachable/);
+  });
+
+  await step('mmsg init (hooks already configured) → ✓ hooks, no snippet', async () => {
+    const initHome = fs.mkdtempSync(path.join(os.tmpdir(), 'minitor-init-'));
+    fs.mkdirSync(path.join(initHome, '.claude'));
+    const wiredSettings = {
+      hooks: {
+        UserPromptSubmit: [
+          { matcher: '', hooks: [{ type: 'command', command: 'bash /x/tools/hook-forward.sh' }] }
+        ],
+        Stop: [
+          { matcher: '', hooks: [{ type: 'command', command: 'bash /x/tools/hook-forward.sh' }] }
+        ],
+        PostToolUse: [
+          { matcher: 'Edit|Write|NotebookEdit|MultiEdit',
+            hooks: [{ type: 'command', command: 'bash /x/tools/hook-forward.sh' }] }
+        ],
+      },
+    };
+    fs.writeFileSync(path.join(initHome, '.claude', 'settings.json'),
+      JSON.stringify(wiredSettings, null, 2));
+    const child = spawn(process.execPath, [CLI_PATH, 'init'], {
+      env: {
+        ...process.env,
+        MINITOR_PORT: String(server.address().port),
+        MINITOR_RULES_DIR: rulesDir,
+        USERPROFILE: initHome,
+        HOME: initHome,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const out = [];
+    child.stdout.on('data', c => out.push(c));
+    const code = await new Promise(res => child.on('close', res));
+    assert.strictEqual(code, 0);
+    const stdout = Buffer.concat(out).toString('utf8');
+    assert.match(stdout, /\[3\/5\] Phase 7 hooks\s+✓/);
+    assert.doesNotMatch(stdout, /Hook snippet for/, 'no snippet when already wired');
+    fs.rmSync(initHome, { recursive: true, force: true });
+  });
+
   // ── server unreachable → exit 3 ────────────────────────────────
   await step('server unreachable → exit 3 + friendly error', async () => {
     const r = await spawnMmsg(['topic-list'], { port: 1 });

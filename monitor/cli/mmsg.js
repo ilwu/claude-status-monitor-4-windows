@@ -699,6 +699,135 @@ COMMANDS['session-show'] = {
   },
 };
 
+// ── init subcommand — setup checklist, not a mutator ───────────────
+// Five checks, each reports ✓ / ✗ and prints the remediation for ✗ items.
+// Deliberately does not modify settings.json (same reasoning as install.ps1:
+// silent auto-merge is one bad edit away from breaking every hook).
+// Exits 0 even when some checks fail so scripts can parse the output.
+
+function hooksConfigured(settingsPath) {
+  try {
+    const raw = fs.readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, '');
+    const j = JSON.parse(raw);
+    const ups = j.hooks?.UserPromptSubmit || [];
+    const stop = j.hooks?.Stop || [];
+    const ptu = j.hooks?.PostToolUse || [];
+    const has = arr => arr.some(entry => (entry.hooks || []).some(h =>
+      typeof h.command === 'string' && /hook-forward\.sh/.test(h.command)));
+    return {
+      found: has(ups) && has(stop) && has(ptu),
+      ups: ups.length, stop: stop.length, ptu: ptu.length,
+      readable: true,
+    };
+  } catch {
+    return { found: false, ups: 0, stop: 0, ptu: 0, readable: false };
+  }
+}
+
+COMMANDS['init'] = {
+  help: 'mmsg init',
+  describe: 'Print a setup checklist for Minitor multi-session workflow.',
+  async run() {
+    const home = process_.env.USERPROFILE || process_.env.HOME || '';
+    const settingsPath = path.join(home, '.claude', 'settings.json');
+    const repoRoot = path.resolve(__dirname, '..', '..');
+    const forwardScript = path.join(repoRoot, 'tools', 'hook-forward.sh');
+
+    const lines = ['=== Minitor multi-session setup checklist ==='];
+    lines.push('');
+
+    // [1] Tray app
+    let trayOk = false;
+    let trayMsg;
+    try {
+      const r = await apiRequest('GET', '/api/health');
+      if (r.status === 200 && r.body.ok) {
+        trayOk = true;
+        trayMsg = `running (pid ${r.body.pid}, port ${PORT})`;
+      } else {
+        trayMsg = `responded but /api/health not ok (status ${r.status})`;
+      }
+    } catch (e) {
+      trayMsg = e.serverDown
+        ? `unreachable at ${BASE} — start via monitor/start.vbs or re-run install.ps1`
+        : `error: ${e.message}`;
+    }
+    lines.push(`[1/5] Tray app          ${trayOk ? '✓' : '✗'}  ${trayMsg}`);
+
+    // [2] mmsg CLI invocation
+    const cliInvoked = process_.argv[1] || '(unknown)';
+    lines.push(`[2/5] mmsg invocation   ✓  running as: ${cliInvoked}`);
+    lines.push('       PATH setup: add bin/ to %PATH% or copy bin/mmsg.cmd to a PATH dir.');
+
+    // [3] Phase 7 hooks
+    const hooks = hooksConfigured(settingsPath);
+    let hookMark, hookMsg;
+    if (!fs.existsSync(settingsPath)) {
+      hookMark = '✗';
+      hookMsg = `no ${settingsPath} — create it with the snippet below`;
+    } else if (!hooks.readable) {
+      hookMark = '✗';
+      hookMsg = `settings.json exists but isn't valid JSON — fix it first`;
+    } else if (hooks.found) {
+      hookMark = '✓';
+      hookMsg = `hook-forward.sh wired in UserPromptSubmit + Stop + PostToolUse`;
+    } else {
+      hookMark = '✗';
+      hookMsg = `settings.json readable; current slots — UPS:${hooks.ups} Stop:${hooks.stop} PTU:${hooks.ptu}`;
+    }
+    lines.push(`[3/5] Phase 7 hooks     ${hookMark}  ${hookMsg}`);
+
+    // [4] API key (optional, for P4 summary)
+    const apiKeySet = !!process_.env.ANTHROPIC_API_KEY;
+    lines.push(`[4/5] ANTHROPIC_API_KEY ${apiKeySet ? '✓' : '○'}  ${apiKeySet
+      ? 'set (required for future summary generator)'
+      : 'not set — optional, only needed if you run LLM summary generation'}`);
+
+    // [5] Rules dir
+    const rules = loadAllRules();
+    const rulesOk = rules.length > 0;
+    lines.push(`[5/5] Rules discoverable ${rulesOk ? '✓' : '✗'}  ${rulesOk
+      ? `${rules.length} active rule(s) in ${rulesDir()}`
+      : `no rules found at ${rulesDir()}`}`);
+
+    lines.push('');
+    const failing = [];
+    if (!trayOk) failing.push(1);
+    if (!hooks.found) failing.push(3);
+    if (!rulesOk) failing.push(5);
+    if (failing.length === 0) {
+      lines.push('All required checks passed. `mmsg recovery` should return real content after your next session.');
+    } else {
+      lines.push(`Required checks failing: ${failing.join(', ')}.`);
+    }
+
+    // Remediation for the common case: hooks not wired
+    if (!hooks.found) {
+      lines.push('');
+      lines.push('── Hook snippet for ~/.claude/settings.json ──');
+      const cmd = `bash ${forwardScript.replace(/\\/g, '/')}`;
+      lines.push('  {');
+      lines.push('    "hooks": {');
+      lines.push('      "UserPromptSubmit": [');
+      lines.push(`        { "matcher": "", "hooks": [{ "type": "command", "command": "${cmd}" }] }`);
+      lines.push('      ],');
+      lines.push('      "Stop": [');
+      lines.push(`        { "matcher": "", "hooks": [{ "type": "command", "command": "${cmd}" }] }`);
+      lines.push('      ],');
+      lines.push('      "PostToolUse": [');
+      lines.push(`        { "matcher": "Edit|Write|NotebookEdit|MultiEdit", "hooks": [{ "type": "command", "command": "${cmd}" }] }`);
+      lines.push('      ]');
+      lines.push('    }');
+      lines.push('  }');
+      lines.push('');
+      lines.push('  Merge into existing hook arrays alongside whatever you already have.');
+      lines.push('  See `mmsg rules show multi-session-dispatch` for when to use this.');
+    }
+
+    process_.stdout.write(lines.join('\n') + '\n');
+  },
+};
+
 // ── help ─────────────────────────────────────────────────────────────
 COMMANDS['help'] = {
   help: 'mmsg help [command]',
@@ -721,7 +850,7 @@ COMMANDS['help'] = {
                    'snapshot', 'recovery',
                    'record-transcript', 'record-file-op', 'summary',
                    'session-list', 'session-search', 'session-show',
-                   'rules',
+                   'rules', 'init',
                    'help'];
     for (const name of order) {
       lines.push(`  ${name.padEnd(12)} ${COMMANDS[name].describe}`);
