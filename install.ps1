@@ -164,6 +164,34 @@ if (Test-Path $mmsgCmd) {
     Write-Host "  WARNING: bin/mmsg.cmd missing — the mmsg CLI shortcut isn't available." -ForegroundColor Yellow
 }
 
+# Phase 7 hook status check (read-only — we never mutate settings.json
+# here, because safe-merging arbitrary user hook trees is fragile and
+# one bad edit breaks every Claude Code session. Just show the counts
+# so the user knows what's there, and print the snippet below so they
+# can paste it themselves.)
+$settingsGlobal = Join-Path $env:USERPROFILE ".claude\settings.json"
+$hasUPS = 0
+$hasStop = 0
+$hasPTU = 0
+$settingsReadable = $false
+if (Test-Path $settingsGlobal) {
+    try {
+        $s = Get-Content $settingsGlobal -Raw | ConvertFrom-Json
+        $settingsReadable = $true
+        if ($s.hooks -and $s.hooks.UserPromptSubmit) { $hasUPS = @($s.hooks.UserPromptSubmit).Count }
+        if ($s.hooks -and $s.hooks.Stop) { $hasStop = @($s.hooks.Stop).Count }
+        if ($s.hooks -and $s.hooks.PostToolUse) { $hasPTU = @($s.hooks.PostToolUse).Count }
+    } catch {
+        Write-Host "  NOTE: ~/.claude/settings.json exists but isn't parseable as JSON." -ForegroundColor Yellow
+    }
+}
+if ($settingsReadable) {
+    Write-Host "  Phase 7 hook slots in ~/.claude/settings.json:"
+    Write-Host "    UserPromptSubmit: $hasUPS entry(ies)"
+    Write-Host "    Stop:             $hasStop entry(ies)"
+    Write-Host "    PostToolUse:      $hasPTU entry(ies)"
+}
+
 # ── Done ─────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "  Installation complete!" -ForegroundColor Green
@@ -200,6 +228,31 @@ if ($memoryApiOk) {
     Write-Host "        }" -ForegroundColor DarkGray
     Write-Host "      }" -ForegroundColor DarkGray
     Write-Host "    (Not installed automatically — it's a per-project / per-user decision.)"
+
+    Write-Host ""
+    Write-Host "  Optional cross-session recording (Phase 7, required for ``mmsg recovery`` to have real content):" -ForegroundColor Cyan
+    $forwardScript = Join-Path $toolsDir "hook-forward.sh"
+    $forwardCmd = "bash " + ($forwardScript -replace '\\', '/')
+    Write-Host "    Add all three of these hooks to ~/.claude/settings.json (alongside any existing hooks):"
+    Write-Host ""
+    Write-Host "      {" -ForegroundColor DarkGray
+    Write-Host "        `"hooks`": {" -ForegroundColor DarkGray
+    Write-Host "          `"UserPromptSubmit`": [" -ForegroundColor DarkGray
+    Write-Host "            { `"matcher`": `"`"," -ForegroundColor DarkGray
+    Write-Host "              `"hooks`": [{ `"type`": `"command`", `"command`": `"$forwardCmd`" }] }" -ForegroundColor DarkGray
+    Write-Host "          ]," -ForegroundColor DarkGray
+    Write-Host "          `"Stop`": [" -ForegroundColor DarkGray
+    Write-Host "            { `"matcher`": `"`"," -ForegroundColor DarkGray
+    Write-Host "              `"hooks`": [{ `"type`": `"command`", `"command`": `"$forwardCmd`" }] }" -ForegroundColor DarkGray
+    Write-Host "          ]," -ForegroundColor DarkGray
+    Write-Host "          `"PostToolUse`": [" -ForegroundColor DarkGray
+    Write-Host "            { `"matcher`": `"Edit|Write|NotebookEdit|MultiEdit`"," -ForegroundColor DarkGray
+    Write-Host "              `"hooks`": [{ `"type`": `"command`", `"command`": `"$forwardCmd`" }] }" -ForegroundColor DarkGray
+    Write-Host "          ]" -ForegroundColor DarkGray
+    Write-Host "        }" -ForegroundColor DarkGray
+    Write-Host "      }" -ForegroundColor DarkGray
+    Write-Host "    See docs/rules/multi-session-dispatch.md for when to use this (Type 1/2 topics, handoff)."
+    Write-Host "    Not auto-merged — mutating a live settings.json from a script is too easy to get wrong."
 }
 
 Write-Host ""
