@@ -189,6 +189,42 @@ Session resolution for `snapshot` / `recovery`: `--session=<id>` beats `/api/ses
 
 Exit codes: `0` ok / `1` API error / `2` usage error / `3` server unreachable. Override the port with `MINITOR_PORT=<n>`.
 
+### Calling `mmsg` from inside a Claude Code session
+
+When Claude invokes `mmsg` through its Bash tool, Claude Code will prompt for permission on every call by default. That's a deliberate safety posture, not a bug — but it also interrupts flow if Claude is doing a handoff or snapshot mid-task. You have three ways to deal with it, pick what matches your comfort level:
+
+**1. Accept the prompts.** Safest default. Zero config. You approve each `mmsg` call explicitly. Downside: the prompt breaks flow every few minutes in agent-heavy workflows.
+
+**2. Project-scoped allow rule.** In a given project's `.claude/settings.local.json` (gitignored by convention), add:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(mmsg:*)",
+      "Bash(<path-to-repo>/bin/mmsg.cmd:*)"
+    ]
+  }
+}
+```
+
+Scope stays narrow (this project only). Best trade-off for most people.
+
+**3. User-global allow rule.** Same pattern, written to `~/.claude/settings.json` — applies to every Claude Code session on this machine. Most convenient, broadest trust.
+
+Read the rules the way Claude Code does: `Bash(mmsg:*)` allows commands whose prefix is literally `mmsg` followed by any arguments — **not** a wildcard for arbitrary shell. The CLI itself only talks to `127.0.0.1:19823` and cannot reach the network, so the blast radius is whatever operations the Memory API exposes (list / read / write topics and snapshots on your own machine).
+
+We default to no preset. Each user makes this call explicitly.
+
+### Why not an MCP server?
+
+Fair question — MCP is the obvious path for "let the agent call this tool without shell prompts." We considered it and decided against shipping one for now:
+
+- **stdio MCP** (the common transport) would spawn a dedicated Node process per Claude Code session. That's per-session memory overhead, and once running it's an invisible background process — ironic for a repo whose whole pitch is "know what your Claude processes are eating."
+- **HTTP/SSE MCP** could reuse the running tray app (zero new processes), but we haven't verified Claude Code's current remote-MCP behavior end-to-end, and we'd rather not ship a config we can't stand behind.
+
+If you want MCP anyway, the existing `/api/*` HTTP surface is a close fit — a thin wrapper turning `mcp__minitor__*` tool calls into HTTP requests would be ~150 lines. PRs welcome.
+
 ### Optional: UserPromptSubmit reminder hook
 
 Claude Code runs this hook before every user prompt. The reminder hook nudges you to `mmsg snapshot` every 10 user prompts (per session, diff-based — so JSONL gaps and re-runs don't cause false skips or doubled reminders). It is **not** installed automatically — paste this into `~/.claude/settings.local.json` (or a per-project `.claude/settings.local.json`) when you want it:
@@ -241,9 +277,26 @@ These use temp directories and ephemeral ports and never touch your running tray
 
 ---
 
+## Multi-session workflow (optional)
+
+Running two or three Claude Code sessions in parallel — a "main" session orchestrating and "sub" sessions doing focused work — turns into a coordination problem: who's working on what, how does a sub-session report back, how does a fresh session pick up after a crash. Minitor's topic/snapshot primitives are the machinery; the *patterns* for using them live in [`docs/rules/`](docs/rules/README.md).
+
+The canonical rule is [`multi-session-dispatch`](docs/rules/multi-session-dispatch.md): Type 1 (session-memory) vs Type 2 (dispatch) topics, the 4-part user-facing report format, race handling, a new-user onboarding checklist. Rules are discoverable and readable without leaving the terminal:
+
+```bash
+mmsg rules list                         # all active rules
+mmsg rules show multi-session-dispatch  # print the rule body
+```
+
+Other projects that use Minitor as their multi-session runtime can reference these rules from their own `CLAUDE.md` with `mmsg rules show <name>` rather than hardcoding an absolute path — the rules dir stays the single source of truth.
+
+---
+
 ## Quick Install
 
 **Prerequisites:** Node.js 18+, Git Bash (comes with [Git for Windows](https://git-scm.com/))
+
+### Basic — statusline memory monitor
 
 ```powershell
 git clone https://github.com/user/claude-status-monitor-4-windows
@@ -261,6 +314,15 @@ That's it. The installer:
 6. Verifies `/api/health` and prints `mmsg` CLI / hook setup hints
 
 Open a Claude Code session and the statusline appears. For the `mmsg` CLI, add `bin/` to your `%PATH%` or copy `bin/mmsg.cmd` to a directory already on `%PATH%` (the installer's output tells you how). Re-running `install.ps1` is safe — it stops the running monitor on port 19823 first, refreshes installed files, and restarts.
+
+### Advanced — cross-session coordination
+
+If you want the full Multi-session workflow (Phase 7 transcript recording + recovery reports for session handoff):
+
+1. Run `install.ps1` (above) so the tray app is up.
+2. Put the three-hook block from the [Optional: UserPromptSubmit reminder hook](#optional-userpromptsubmit-reminder-hook) section — plus the `UserPromptSubmit` / `Stop` / `PostToolUse` triple for `tools/hook-forward.sh` — into your `~/.claude/settings.json` (or a per-project `.claude/settings.local.json`). See [`docs/rules/multi-session-dispatch.md`](docs/rules/multi-session-dispatch.md) §10 for the exact JSON.
+3. Restart any open Claude Code sessions so they pick up the hooks.
+4. Verify: after a short session, `mmsg recovery` should print a Markdown report with real `Recent transcripts` and `Recent file ops`.
 
 ## How It Works
 

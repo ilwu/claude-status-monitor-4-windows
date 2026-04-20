@@ -188,6 +188,42 @@ curl -X POST http://127.0.0.1:19823/api/topics \
 
 Exit code：`0` 成功 / `1` API 錯 / `2` 使用錯 / `3` server 連不上。Port 覆寫用 `MINITOR_PORT=<n>`。
 
+### 在 Claude Code session 裡呼叫 `mmsg`
+
+當 Claude 透過 Bash tool 呼叫 `mmsg` 時，Claude Code 預設每次都會跳出權限確認。這是故意的安全姿態，不是 bug — 但如果 Claude 在做跨 session 交接或中途 snapshot，這種 prompt 會頻繁打斷節奏。三個選擇，依你的 comfort level 挑：
+
+**1. 接受每次 prompt。** 最安全的預設。零設定。每次 `mmsg` 呼叫你都明確批准。代價：agent-heavy 流程裡每幾分鐘被打斷。
+
+**2. Project-scope allow rule。** 在需要用 `mmsg` 的 project 的 `.claude/settings.local.json`（依慣例已 gitignore）加：
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(mmsg:*)",
+      "Bash(<path-to-repo>/bin/mmsg.cmd:*)"
+    ]
+  }
+}
+```
+
+範圍限於該 project。對多數人是最佳折衷。
+
+**3. User-global allow rule。** 同樣的 pattern 寫到 `~/.claude/settings.json` — 對這台機器上所有 Claude Code session 生效。最方便，信任範圍最廣。
+
+讀這些規則的方式要對齊 Claude Code 的解讀：`Bash(mmsg:*)` 只允許**前綴剛好是 `mmsg` 加任意參數**的指令 — **不是** arbitrary shell 的 wildcard。CLI 本身只會打 `127.0.0.1:19823`，不碰網路；影響範圍僅限 Memory API 能做的事（在你自己機器上列 / 讀 / 寫 topics 和 snapshots）。
+
+預設不幫你設任何。這個決定每個使用者自己做。
+
+### 為什麼沒做 MCP server？
+
+合理的疑問 — MCP 確實是「讓 agent 呼叫工具不用 shell prompt」的標準答案。我們想過，暫時決定不 ship：
+
+- **stdio MCP**（常見 transport）會 per-session spawn 一個獨立 Node 進程。每個 session 都多一份記憶體開銷，而且起來後就是個看不見的 background process — 對一個核心定位是「讓你知道你的 Claude 進程到底在吃什麼」的 repo 來說，這諷刺得過分。
+- **HTTP/SSE MCP** 可以復用正在跑的 tray app（零新進程），但我們還沒端對端驗過 Claude Code 當前的 remote-MCP 行為，不想 ship 一個我們自己站不住的設定。
+
+如果你真的想要 MCP，既有 `/api/*` HTTP 層很適合做薄 wrapper — 把 `mcp__minitor__*` tool call 轉成 HTTP request 大概 150 行。歡迎 PR。
+
 ### 可選：UserPromptSubmit 提醒 hook
 
 Claude Code 每次使用者送 prompt 前會觸發這個 hook。提醒 hook 每 10 次 user prompt 提醒一次 `mmsg snapshot`（per-session 計數，diff-based — .jsonl 有 gap 或重跑不會誤跳或重複）。**不自動安裝**，要時貼到 `~/.claude/settings.local.json`（或 per-project `.claude/settings.local.json`）：
@@ -240,9 +276,26 @@ node monitor/test/smoke-hook.js  # UserPromptSubmit hook，假 HOME
 
 ---
 
+## 多 Session 協作（可選）
+
+同時跑兩三個 Claude Code session —「主」session 統籌、「sub」session 做專注工作 — 會冒出協作問題：誰在做什麼、sub-session 怎麼回報、壞掉了新 session 怎麼接手。Minitor 的 topic / snapshot 是**機制**；使用的**模式**寫在 [`docs/rules/`](docs/rules/README.md)。
+
+當前主要 rule 是 [`multi-session-dispatch`](docs/rules/multi-session-dispatch.md)：Type 1（session 記憶）/ Type 2（派工）topic、主 session 對使用者的 4 段回報格式、Race 處理、全新使用者 onboarding checklist。Rules 不用離開 terminal 就能查：
+
+```bash
+mmsg rules list                         # 列出所有 active rule
+mmsg rules show multi-session-dispatch  # 印規則內文
+```
+
+其他用 Minitor 當多 session runtime 的專案可以在自己的 `CLAUDE.md` 用 `mmsg rules show <name>` 引用，不用硬編絕對路徑 — rules 目錄是單一事實來源。
+
+---
+
 ## 快速安裝
 
 **前置條件：** Node.js 18+、Git Bash（隨 [Git for Windows](https://git-scm.com/) 安裝）
+
+### 基本 — statusline 記憶體監控
 
 ```powershell
 git clone https://github.com/user/claude-status-monitor-4-windows
@@ -260,6 +313,15 @@ cd claude-status-monitor-4-windows
 6. 驗證 `/api/health` 並印出 `mmsg` CLI / hook 設定指示
 
 打開 Claude Code session 就能看到底部狀態列。`mmsg` CLI 方面，把 `bin/` 加到 `%PATH%` 或複製 `bin/mmsg.cmd` 到已在 `%PATH%` 的目錄（installer 輸出會指示）。重跑 `install.ps1` 是安全的 — 它會先停掉 19823 上的舊 monitor，更新檔案，再重啟。
+
+### 進階 — 跨 session 協作
+
+要完整用多 session workflow（Phase 7 對話記錄 + 接手 recovery 報告）：
+
+1. 跑 `install.ps1`（上面）把 tray app 起來
+2. 把 `UserPromptSubmit` / `Stop` / `PostToolUse` 三 hook 指向 `tools/hook-forward.sh` 的 JSON block 貼到 `~/.claude/settings.json`（或 per-project `.claude/settings.local.json`）。確切 JSON 見 [`docs/rules/multi-session-dispatch.md`](docs/rules/multi-session-dispatch.md) §10
+3. 重啟任何開著的 Claude Code session 讓它們載入 hook
+4. 驗：跑一小段 session 後，`mmsg recovery` 應該印出含真實 `Recent transcripts` 和 `Recent file ops` 的 Markdown 報告
 
 ## 運作原理
 
