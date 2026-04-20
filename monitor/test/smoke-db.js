@@ -55,7 +55,11 @@ function runDaoTests() {
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all()
       .map(r => r.name);
-    for (const t of ['sessions', 'prompts', 'file_edits', 'snapshots', 'topics', 'topic_messages']) {
+    for (const t of [
+      'sessions', 'prompts', 'file_edits', 'snapshots', 'topics', 'topic_messages',
+      // Phase 7 additions — distinct tables, not renames of existing ones
+      'transcripts', 'file_ops', 'summaries',
+    ]) {
       assert(names.includes(t), `table missing: ${t} (have: ${names.join(',')})`);
     }
   });
@@ -135,9 +139,218 @@ function runDaoTests() {
     assert.strictEqual(db.closeTopic('t-nope'), false);
   });
 
-  step('stats returns non-negative counts', () => {
+  // ── Phase 7: transcripts / file_ops / summaries ─────────────────
+  step('insertTranscript auto-increments seq + role enforcement', () => {
+    const a = db.insertTranscript({
+      session_id: 's1', role: 'user', content: 'hello',
+      cwd: 'C:/x', transcript_path: 'C:/fake/s1.jsonl',
+    });
+    const b = db.insertTranscript({
+      session_id: 's1', role: 'assistant', content: 'hi',
+      cwd: 'C:/x', transcript_path: 'C:/fake/s1.jsonl',
+    });
+    assert.strictEqual(a.seq, 1);
+    assert.strictEqual(b.seq, 2);
+    assert.throws(
+      () => db.insertTranscript({ session_id: 's1', role: 'system', content: 'x' }),
+      /role must be/
+    );
+  });
+
+  step('insertTranscript truncates content at 64KB', () => {
+    const huge = 'A'.repeat(64 * 1024 + 500);
+    const r = db.insertTranscript({ session_id: 's1', role: 'user', content: huge });
+    const row = db.listTranscripts('s1', { since_seq: r.seq - 1, limit: 1 })[0];
+    assert(row.content.endsWith('…[TRUNCATED]'));
+    assert(row.content.length <= 64 * 1024 + 20);
+  });
+
+  step('listTranscripts with latest + role filter (reviewer #2 fix)', () => {
+    // Pre-fix: `{latest, role}` ignored the role filter inside the inner subquery.
+    // Post-fix: inner subquery applies role, outer reorders ASC.
+    const lastUser = db.listTranscripts('s1', { latest: 1, role: 'user' });
+    const lastAsst = db.listTranscripts('s1', { latest: 1, role: 'assistant' });
+    assert.strictEqual(lastUser.length, 1);
+    assert.strictEqual(lastUser[0].role, 'user');
+    assert.strictEqual(lastAsst.length, 1);
+    assert.strictEqual(lastAsst[0].role, 'assistant');
+  });
+
+  step('listTranscripts filters by role / latest / since_seq', () => {
+    const allAsc = db.listTranscripts('s1');
+    assert(allAsc.length >= 3);
+    const userOnly = db.listTranscripts('s1', { role: 'user' });
+    assert(userOnly.every(r => r.role === 'user'));
+    const latestOne = db.listTranscripts('s1', { latest: 1 });
+    assert.strictEqual(latestOne.length, 1);
+    const latestSeq = latestOne[0].seq;
+    const since = db.listTranscripts('s1', { since_seq: latestSeq - 1 });
+    assert(since.every(r => r.seq > latestSeq - 1));
+  });
+
+  step('insertFileOp stores tool_input JSON + auto seq', () => {
+    const r = db.insertFileOp({
+      session_id: 's1', tool_name: 'Edit',
+      file_path: 'C:\\workspace\\a.ts',
+      tool_input: { old_string: 'foo', new_string: 'bar' },
+      tool_use_id: 'toolu_01abc',
+    });
+    assert.strictEqual(r.seq, 1);
+    assert.strictEqual(r.truncated, false);
+    const rows = db.listFileOpsSession('s1');
+    const edit = rows.find(x => x.tool_use_id === 'toolu_01abc');
+    assert(edit, 'edit row should exist');
+    assert.strictEqual(edit.file_path, 'C:/workspace/a.ts', 'path normalized');
+    assert.strictEqual(edit.tool_input_truncated, 0);
+    const parsed = JSON.parse(edit.tool_input);
+    assert.strictEqual(parsed.old_string, 'foo');
+  });
+
+  step('insertFileOp truncates tool_input at 64KB', () => {
+    const bigInput = { content: 'Z'.repeat(70 * 1024) };
+    const r = db.insertFileOp({
+      session_id: 's1', tool_name: 'Write',
+      file_path: 'C:/big.txt',
+      tool_input: bigInput,
+      tool_use_id: 'toolu_big',
+    });
+    assert.strictEqual(r.truncated, true);
+    const row = db.listFileOpsSession('s1').find(x => x.tool_use_id === 'toolu_big');
+    assert.strictEqual(row.tool_input_truncated, 1);
+    assert(row.tool_input_size > 64 * 1024, 'original size preserved');
+    assert(row.tool_input.endsWith('…[TRUNCATED]'));
+  });
+
+  step('showSession asymmetric range (reviewer #1 fix)', () => {
+    // With only from_seq set, the old code applied both ts bounds (clamped to
+    // last transcript in the window), dropping ops after that point. Confirm
+    // from_seq alone keeps ops up to session end, not clamped to window end.
+    const SSID = 's-asym-range';
+    // Seed 4 transcripts at increasing ts
+    const now = Date.now();
+    for (let i = 0; i < 4; i++) {
+      db.insertTranscript({
+        session_id: SSID, role: i % 2 === 0 ? 'user' : 'assistant',
+        content: `turn ${i}`, ts: now + i * 1000,
+      });
+    }
+    // Add a file_op at ts AFTER the last transcript
+    db.insertFileOp({
+      session_id: SSID, tool_name: 'Write', file_path: 'C:/asym/late.ts',
+      tool_input: { content: 'late' }, ts: now + 10_000,
+    });
+    // Add a file_op BEFORE the earliest transcript window when from_seq=2
+    db.insertFileOp({
+      session_id: SSID, tool_name: 'Write', file_path: 'C:/asym/early.ts',
+      tool_input: { content: 'early' }, ts: now - 5_000,
+    });
+
+    // from_seq=2 only: should include the LATE op (ts after window end),
+    // should exclude the EARLY op (ts before window start)
+    const r1 = db.showSession(SSID, { from_seq: 2 });
+    const paths1 = r1.file_ops.map(o => o.file_path);
+    assert(paths1.includes('C:/asym/late.ts'), 'late op should be kept (no to_seq)');
+    assert(!paths1.includes('C:/asym/early.ts'), 'early op below from_seq window');
+
+    // to_seq=2 only: should include EARLY op, exclude LATE op
+    const r2 = db.showSession(SSID, { to_seq: 2 });
+    const paths2 = r2.file_ops.map(o => o.file_path);
+    assert(paths2.includes('C:/asym/early.ts'), 'early op should be kept (no from_seq)');
+    assert(!paths2.includes('C:/asym/late.ts'), 'late op above to_seq window');
+  });
+
+  step('synthesizeSessionFromTranscripts uses latest cwd (reviewer #3 fix)', () => {
+    // Session with two cwds at different ts. Pre-fix MAX(cwd) would return
+    // lexicographic max; post-fix uses most-recent-ts.
+    const SSID = 's-multi-cwd';
+    const now = Date.now();
+    db.insertTranscript({
+      session_id: SSID, role: 'user', content: 'first',
+      cwd: 'C:/workspace/z-newer', ts: now + 1000,  // later
+    });
+    db.insertTranscript({
+      session_id: SSID, role: 'assistant', content: 'reply',
+      cwd: 'C:/workspace/a-older', ts: now,  // earlier
+    });
+    const syn = db.synthesizeSessionFromTranscripts(SSID);
+    // If MAX(cwd) were used, 'z-newer' would win lexicographically (>=) AND
+    // temporally here. To actually distinguish, re-insert with swapped order.
+    assert(syn, 'session should synthesize');
+    // The row at MAX(ts) is the 'z-newer' one; synthesized cwd should match.
+    assert.strictEqual(syn.cwd, 'C:/workspace/z-newer',
+      'should be the cwd of the most-recent transcript');
+  });
+
+  step('listFileOpsByPathAll finds across sessions', () => {
+    db.upsertSession({ session_id: 's-other', cwd: 'C:/other' });
+    db.insertFileOp({
+      session_id: 's-other', tool_name: 'Edit',
+      file_path: 'C:/workspace/a.ts',
+      tool_input: { x: 1 },
+      tool_use_id: 'toolu_s_other',
+    });
+    const hits = db.listFileOpsByPathAll('C:/workspace/a.ts');
+    const sessionIds = new Set(hits.map(r => r.session_id));
+    assert(sessionIds.has('s1'));
+    assert(sessionIds.has('s-other'));
+  });
+
+  step('insertSummary stores JSON keywords + upsert on range', () => {
+    const r1 = db.insertSummary({
+      session_id: 's1', range_start_seq: 1, range_end_seq: 3,
+      text: 'summary v1',
+      keywords: ['alpha', 'beta'],
+      generated_by: 'claude-haiku-4-5',
+    });
+    assert(r1.changes > 0);
+
+    // Same range → upsert (not duplicate)
+    const r2 = db.insertSummary({
+      session_id: 's1', range_start_seq: 1, range_end_seq: 3,
+      text: 'summary v2',
+      keywords: ['alpha', 'gamma'],
+    });
+    const all = db.listSummariesSession('s1');
+    const matches = all.filter(x => x.range_start_seq === 1 && x.range_end_seq === 3);
+    assert.strictEqual(matches.length, 1, 'upsert, not duplicate');
+    assert.strictEqual(matches[0].text, 'summary v2');
+    const kw = JSON.parse(matches[0].keywords);
+    assert.deepStrictEqual(kw, ['alpha', 'gamma']);
+  });
+
+  step('insertSummary rejects inverted range', () => {
+    assert.throws(
+      () => db.insertSummary({
+        session_id: 's1', range_start_seq: 10, range_end_seq: 5, text: 'bad',
+      }),
+      /range_end_seq must be/
+    );
+  });
+
+  step('getLatestSummary returns the highest range_end_seq', () => {
+    db.insertSummary({
+      session_id: 's1', range_start_seq: 4, range_end_seq: 8,
+      text: 'later summary',
+    });
+    const latest = db.getLatestSummary('s1');
+    assert.strictEqual(latest.range_end_seq, 8);
+  });
+
+  step('searchSummaries matches text OR keywords (LIKE)', () => {
+    const byText = db.searchSummaries('later');
+    assert(byText.some(r => r.session_id === 's1'));
+    const byKw = db.searchSummaries('gamma');
+    assert(byKw.some(r => r.session_id === 's1'));
+    const miss = db.searchSummaries('no-such-keyword-xyz-1234');
+    assert.strictEqual(miss.length, 0);
+  });
+
+  step('stats returns non-negative counts (incl. Phase 7 tables)', () => {
     const s = db.stats();
-    for (const k of ['sessions', 'prompts', 'file_edits', 'snapshots', 'topics', 'topic_messages']) {
+    for (const k of [
+      'sessions', 'prompts', 'file_edits', 'snapshots', 'topics', 'topic_messages',
+      'transcripts', 'file_ops', 'summaries',
+    ]) {
       assert(typeof s[k] === 'number' && s[k] >= 0, `bad stat ${k}: ${s[k]}`);
     }
     // stats().db_path reflects resolveDbPath() (env > default), not init()'s

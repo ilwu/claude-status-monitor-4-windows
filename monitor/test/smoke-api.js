@@ -254,6 +254,62 @@ async function runTests() {
     assert.strictEqual(r.status, 404);
   });
 
+  // ── P5: recovery integrates Phase 7 transcripts/file_ops/summary ────
+  await step('GET /api/sessions/:id/recovery now includes Phase 7 fields', async () => {
+    const r = await request('GET', '/api/sessions/smoke-a/recovery');
+    assert.strictEqual(r.status, 200);
+    assert('recent_transcripts' in r.body, 'recent_transcripts field present');
+    assert('recent_file_ops' in r.body, 'recent_file_ops field present');
+    assert('latest_summary' in r.body, 'latest_summary field present');
+    assert('synthetic_session' in r.body, 'synthetic_session flag present');
+    assert.strictEqual(r.body.synthetic_session, false,
+      'smoke-a has a real sessions row, not synthetic');
+  });
+
+  await step('recovery works for hook-only session (synthetic metadata)', async () => {
+    const HID = 'phase7-hook-only';
+    // Record via /api/hook, never call upsertSession
+    await request('POST', '/api/hook', {
+      hook_event_name: 'UserPromptSubmit',
+      session_id: HID,
+      cwd: 'C:/hook-only/cwd',
+      transcript_path: 'C:/fake/hook-only.jsonl',
+      prompt: 'first hook-only prompt',
+    });
+    await request('POST', '/api/hook', {
+      hook_event_name: 'Stop',
+      session_id: HID,
+      cwd: 'C:/hook-only/cwd',
+      last_assistant_message: 'first hook-only response',
+    });
+    await request('POST', '/api/hook', {
+      hook_event_name: 'PostToolUse',
+      session_id: HID,
+      tool_name: 'Write',
+      tool_input: { file_path: 'C:/hook-only/x.txt', content: 'hi' },
+      tool_use_id: 'toolu_hookonly_1',
+    });
+    const r = await request('GET', `/api/sessions/${HID}/recovery`);
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.synthetic_session, true);
+    assert.strictEqual(r.body.session.session_id, HID);
+    assert.strictEqual(r.body.session.cwd, 'C:/hook-only/cwd');
+    assert.strictEqual(r.body.session.message_count, 2, '2 transcripts recorded');
+    assert.strictEqual(r.body.recent_transcripts.length, 2);
+    assert.strictEqual(r.body.recent_file_ops.length, 1);
+    assert.strictEqual(r.body.recent_file_ops[0].tool_name, 'Write');
+  });
+
+  await step('recovery prompts/edits limit params flow to Phase 7 queries', async () => {
+    const r = await request('GET',
+      '/api/sessions/smoke-a/recovery?prompts=2&edits=3');
+    assert.strictEqual(r.status, 200);
+    // prompts limit×2 applies to transcripts (user+assistant), so ≤ 4
+    assert(r.body.recent_transcripts.length <= 4);
+    // edits limit caps file_ops
+    assert(r.body.recent_file_ops.length <= 3);
+  });
+
   // ── routing / error handling ───────────────────────────────────
   await step('Unknown /api route → 404 with error shape', async () => {
     const r = await request('GET', '/api/totally-unknown');
@@ -396,6 +452,201 @@ async function runTests() {
     const ids = r.body.map(t => t.id);
     assert(!ids.includes(topicA));
     assert(ids.includes(topicB));
+  });
+
+  // ── Phase 7: record + session endpoints ────────────────────────
+  const PSID = 'phase7-session-a';
+  const PCWD = 'C:/phase7/workspace/a';
+
+  await step('POST /api/record/transcript (missing session_id) → 400', async () => {
+    const r = await request('POST', '/api/record/transcript', { role: 'user', content: 'x' });
+    assert.strictEqual(r.status, 400);
+  });
+
+  await step('POST /api/record/transcript (bad role) → 400', async () => {
+    const r = await request('POST', '/api/record/transcript',
+      { session_id: PSID, role: 'system', content: 'x' });
+    assert.strictEqual(r.status, 400);
+    assert.strictEqual(r.body.error.code, 'bad_field');
+  });
+
+  await step('POST /api/record/transcript → 201 + seq', async () => {
+    const a = await request('POST', '/api/record/transcript', {
+      session_id: PSID, role: 'user', content: 'hello from phase7',
+      cwd: PCWD, transcript_path: 'C:/fake/phase7.jsonl',
+    });
+    assert.strictEqual(a.status, 201);
+    assert.strictEqual(a.body.seq, 1);
+    const b = await request('POST', '/api/record/transcript', {
+      session_id: PSID, role: 'assistant', content: 'acknowledged',
+      cwd: PCWD, transcript_path: 'C:/fake/phase7.jsonl',
+    });
+    assert.strictEqual(b.body.seq, 2);
+  });
+
+  await step('POST /api/record/file-op (missing tool_name) → 400', async () => {
+    const r = await request('POST', '/api/record/file-op',
+      { session_id: PSID, file_path: 'C:/x' });
+    assert.strictEqual(r.status, 400);
+  });
+
+  await step('POST /api/record/file-op → 201 + truncated flag', async () => {
+    const r = await request('POST', '/api/record/file-op', {
+      session_id: PSID, tool_name: 'Edit',
+      file_path: 'C:\\phase7\\main.ts',
+      tool_input: { old_string: 'a', new_string: 'b' },
+      tool_use_id: 'toolu_p7_1',
+    });
+    assert.strictEqual(r.status, 201);
+    assert.strictEqual(r.body.truncated, false);
+    assert.strictEqual(r.body.seq, 1);
+  });
+
+  await step('POST /api/summary (missing fields) → 400', async () => {
+    const r = await request('POST', '/api/summary', { session_id: PSID, text: 'oops' });
+    assert.strictEqual(r.status, 400);
+  });
+
+  await step('POST /api/summary (inverted range) → 400', async () => {
+    const r = await request('POST', '/api/summary', {
+      session_id: PSID, range_start_seq: 5, range_end_seq: 2, text: 'bad',
+    });
+    assert.strictEqual(r.status, 400);
+  });
+
+  await step('POST /api/summary → 201 + upsert on same range', async () => {
+    const r1 = await request('POST', '/api/summary', {
+      session_id: PSID, range_start_seq: 1, range_end_seq: 2,
+      text: 'first', keywords: ['a'], generated_by: 'manual',
+    });
+    assert.strictEqual(r1.status, 201);
+    const r2 = await request('POST', '/api/summary', {
+      session_id: PSID, range_start_seq: 1, range_end_seq: 2,
+      text: 'second', keywords: ['b'],
+    });
+    assert.strictEqual(r2.status, 201);
+    // Verify via search (should hit "second", not both)
+    const s = await request('GET', '/api/session/search?q=second');
+    assert(s.body.some(x => x.session_id === PSID && x.text === 'second'));
+    const s1 = await request('GET', '/api/session/search?q=first');
+    assert(!s1.body.some(x => x.session_id === PSID && x.text === 'first'),
+      'upsert should have replaced the first row');
+  });
+
+  await step('GET /api/session/list (cwd filter) → only matching cwd', async () => {
+    const r = await request('GET',
+      '/api/session/list?cwd=' + encodeURIComponent(PCWD));
+    assert.strictEqual(r.status, 200);
+    assert(r.body.some(s => s.session_id === PSID));
+    assert(r.body.every(s => s.cwd === PCWD));
+  });
+
+  await step('GET /api/session/list (no filter) → all sessions w/ transcripts', async () => {
+    const r = await request('GET', '/api/session/list');
+    assert(r.body.some(s => s.session_id === PSID));
+  });
+
+  await step('GET /api/session/search (missing q) → 400', async () => {
+    const r = await request('GET', '/api/session/search');
+    assert.strictEqual(r.status, 400);
+  });
+
+  await step('GET /api/session/show (missing session_id) → 400', async () => {
+    const r = await request('GET', '/api/session/show');
+    assert.strictEqual(r.status, 400);
+  });
+
+  await step('GET /api/session/show → 200 + transcripts + file_ops', async () => {
+    const r = await request('GET',
+      '/api/session/show?session_id=' + encodeURIComponent(PSID));
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.session_id, PSID);
+    assert(r.body.transcripts.length >= 2);
+    assert(r.body.file_ops.length >= 1);
+    assert.strictEqual(r.body.transcripts[0].role, 'user');
+  });
+
+  await step('GET /api/session/show (seq range) → filters transcripts', async () => {
+    const r = await request('GET',
+      '/api/session/show?session_id=' + encodeURIComponent(PSID) + '&from_seq=2&to_seq=2');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.transcripts.length, 1);
+    assert.strictEqual(r.body.transcripts[0].seq, 2);
+  });
+
+  // ── Hook dispatcher ────────────────────────────────────────────
+  const HSID = 'phase7-hook-session';
+  const HPATH = 'C:/fake/hook-session.jsonl';
+
+  await step('POST /api/hook UserPromptSubmit → transcript role=user', async () => {
+    const r = await request('POST', '/api/hook', {
+      hook_event_name: 'UserPromptSubmit',
+      session_id: HSID,
+      transcript_path: HPATH,
+      cwd: 'C:/hook/cwd',
+      prompt: 'hook-forwarded user prompt',
+    });
+    assert.strictEqual(r.status, 201);
+    assert.strictEqual(r.body.dispatched, 'transcript');
+    const show = await request('GET',
+      '/api/session/show?session_id=' + encodeURIComponent(HSID));
+    assert(show.body.transcripts.some(t => t.role === 'user' && t.content === 'hook-forwarded user prompt'));
+  });
+
+  await step('POST /api/hook Stop → transcript role=assistant', async () => {
+    const r = await request('POST', '/api/hook', {
+      hook_event_name: 'Stop',
+      session_id: HSID,
+      transcript_path: HPATH,
+      cwd: 'C:/hook/cwd',
+      last_assistant_message: 'hook-forwarded assistant response',
+    });
+    assert.strictEqual(r.status, 201);
+    assert.strictEqual(r.body.dispatched, 'transcript');
+  });
+
+  await step('POST /api/hook PostToolUse Edit → file-op', async () => {
+    const r = await request('POST', '/api/hook', {
+      hook_event_name: 'PostToolUse',
+      session_id: HSID,
+      transcript_path: HPATH,
+      cwd: 'C:/hook/cwd',
+      tool_name: 'Edit',
+      tool_input: { file_path: 'C:/hook/edited.ts', old_string: 'x', new_string: 'y' },
+      tool_use_id: 'toolu_hook_edit_1',
+    });
+    assert.strictEqual(r.status, 201);
+    assert.strictEqual(r.body.dispatched, 'file-op');
+  });
+
+  await step('POST /api/hook PostToolUse Bash → ignored', async () => {
+    const r = await request('POST', '/api/hook', {
+      hook_event_name: 'PostToolUse',
+      session_id: HSID,
+      tool_name: 'Bash',
+      tool_input: { command: 'ls' },
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.dispatched, 'ignored');
+  });
+
+  await step('POST /api/hook SessionStart → ignored', async () => {
+    const r = await request('POST', '/api/hook', {
+      hook_event_name: 'SessionStart',
+      session_id: HSID,
+      source: 'startup',
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.dispatched, 'ignored');
+  });
+
+  await step('POST /api/hook missing session_id → 200 ignored (no crash)', async () => {
+    const r = await request('POST', '/api/hook', {
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'orphan',
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.dispatched, 'ignored');
   });
 
   // ── routing / error handling ───────────────────────────────────

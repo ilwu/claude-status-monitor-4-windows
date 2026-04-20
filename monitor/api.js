@@ -152,16 +152,38 @@ router.get('/api/sessions/:id/snapshots', async (req, res, params) => {
   sendJson(res, 200, rows.map(inflateSnapshot));
 });
 
-// GET /api/sessions/:id/recovery — JSON bundle (Markdown is CLI's job in Phase 4)
+// GET /api/sessions/:id/recovery — JSON bundle (Markdown is CLI's job).
+// Phase 5 expansion: pulls Phase 7 transcripts/file_ops/summaries and falls
+// back to synthesizing session metadata from transcripts when the legacy
+// sessions row doesn't exist (hook-only sessions never call upsertSession).
 router.get('/api/sessions/:id/recovery', async (req, res, params, query) => {
-  const session = db.getSession(params.id);
+  let session = db.getSession(params.id);
+  let synthetic_session = false;
+  if (!session) {
+    session = db.synthesizeSessionFromTranscripts(params.id);
+    synthetic_session = !!session;
+  }
   if (!session) return sendError(res, 404, 'not_found', `session: ${params.id}`);
+
   const promptsLimit = clampInt(query.get('prompts'), 10, 1, 100);
   const editsLimit = clampInt(query.get('edits'), 20, 1, 200);
+
+  // Phase 7 data (primary for hook-driven sessions)
+  const recent_transcripts = db.listTranscripts(params.id, { latest: promptsLimit * 2 });
+  const recent_file_ops = db.listFileOpsSession(params.id, { latest: editsLimit });
+  const latest_summary = db.getLatestSummary(params.id);
+
+  // Phase 1 legacy data (snapshot + 200-char preview prompts + file_edits)
   const snapshot = db.getLatestSnapshot(params.id);
+
   sendJson(res, 200, {
     session,
+    synthetic_session,
     latest_snapshot: snapshot ? inflateSnapshot(snapshot) : null,
+    latest_summary,
+    recent_transcripts,
+    recent_file_ops,
+    // Legacy Phase 1 fields — kept so Phase 0-6 CLI renderers don't break
     recent_prompts: db.listPromptsBySession(params.id, { limit: promptsLimit }),
     recent_file_edits: db.listFileEditsBySession(params.id, { limit: editsLimit }),
   });
@@ -284,6 +306,164 @@ router.get('/api/topics/:id', async (req, res, params, query) => {
     });
   }
   sendJson(res, 200, { topic, messages });
+});
+
+// ── Phase 7: record / session (transcripts, file_ops, summaries) ─────
+
+const FILE_OP_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit']);
+
+// Normal REST endpoints — used by the mmsg CLI and ad-hoc curl.
+
+router.post('/api/record/transcript', async (req, res) => {
+  const body = await readJsonBody(req);
+  if (!body.session_id) return sendError(res, 400, 'missing_field', 'session_id required');
+  if (body.role !== 'user' && body.role !== 'assistant') {
+    return sendError(res, 400, 'bad_field', 'role must be "user" or "assistant"');
+  }
+  const r = db.insertTranscript({
+    session_id: body.session_id,
+    role: body.role,
+    content: body.content ?? null,
+    cwd: body.cwd ?? null,
+    transcript_path: body.transcript_path ?? null,
+    ts: body.ts ?? null,
+  });
+  sendJson(res, 201, r);
+});
+
+router.post('/api/record/file-op', async (req, res) => {
+  const body = await readJsonBody(req);
+  if (!body.session_id) return sendError(res, 400, 'missing_field', 'session_id required');
+  if (!body.tool_name) return sendError(res, 400, 'missing_field', 'tool_name required');
+  const r = db.insertFileOp({
+    session_id: body.session_id,
+    tool_name: body.tool_name,
+    file_path: body.file_path ?? null,
+    tool_input: body.tool_input ?? null,
+    tool_use_id: body.tool_use_id ?? null,
+    ts: body.ts ?? null,
+  });
+  sendJson(res, 201, r);
+});
+
+router.post('/api/summary', async (req, res) => {
+  const body = await readJsonBody(req);
+  if (!body.session_id) return sendError(res, 400, 'missing_field', 'session_id required');
+  if (!body.text) return sendError(res, 400, 'missing_field', 'text required');
+  if (body.range_start_seq == null || body.range_end_seq == null) {
+    return sendError(res, 400, 'missing_field', 'range_start_seq and range_end_seq required');
+  }
+  try {
+    const r = db.insertSummary({
+      session_id: body.session_id,
+      range_start_seq: body.range_start_seq,
+      range_end_seq: body.range_end_seq,
+      text: body.text,
+      keywords: body.keywords ?? null,
+      generated_by: body.generated_by ?? null,
+      ts: body.ts ?? null,
+    });
+    sendJson(res, 201, r);
+  } catch (e) {
+    if (/range_end_seq must be/.test(e.message)) {
+      return sendError(res, 400, 'bad_field', e.message);
+    }
+    throw e;
+  }
+});
+
+router.get('/api/session/list', async (req, res, _params, query) => {
+  const cwd = query.get('cwd') || null;
+  const limit = clampInt(query.get('limit'), 20, 1, 500);
+  sendJson(res, 200, db.listTranscriptSessions({ cwd, limit }));
+});
+
+router.get('/api/session/search', async (req, res, _params, query) => {
+  const q = query.get('q');
+  if (!q) return sendError(res, 400, 'missing_param', 'q query param required');
+  const limit = clampInt(query.get('limit'), 10, 1, 100);
+  sendJson(res, 200, db.searchSummaries(q, { limit }));
+});
+
+router.get('/api/session/show', async (req, res, _params, query) => {
+  const session_id = query.get('session_id');
+  if (!session_id) return sendError(res, 400, 'missing_param', 'session_id query param required');
+  const opts = {};
+  const from_seq = query.get('from_seq');
+  const to_seq = query.get('to_seq');
+  if (from_seq != null) {
+    const n = parseInt(from_seq, 10);
+    if (!Number.isFinite(n)) return sendError(res, 400, 'bad_param', 'from_seq must be integer');
+    opts.from_seq = n;
+  }
+  if (to_seq != null) {
+    const n = parseInt(to_seq, 10);
+    if (!Number.isFinite(n)) return sendError(res, 400, 'bad_param', 'to_seq must be integer');
+    opts.to_seq = n;
+  }
+  sendJson(res, 200, db.showSession(session_id, opts));
+});
+
+// Hook dispatcher — the Claude Code hook script just forwards the raw stdin
+// JSON here, and we decide what to do based on hook_event_name. Keeps shell
+// hooks dumb (no JSON parsing in bash, no double-quote/newline escaping
+// hazards with prompt/last_assistant_message). Non-interesting events are
+// silently accepted as 204 so the hook script doesn't need to know which
+// events we care about.
+router.post('/api/hook', async (req, res) => {
+  const body = await readJsonBody(req);
+  const event = body.hook_event_name;
+  const session_id = body.session_id;
+  if (!event || !session_id) {
+    // Missing required Claude Code hook payload fields — accept silently so
+    // a mis-wired hook script doesn't fail the user's prompt.
+    return sendJson(res, 200, { dispatched: 'ignored', reason: 'missing hook_event_name or session_id' });
+  }
+  const common = {
+    session_id,
+    cwd: body.cwd ?? null,
+    transcript_path: body.transcript_path ?? null,
+  };
+  try {
+    if (event === 'UserPromptSubmit' && body.prompt != null) {
+      const r = db.insertTranscript({ ...common, role: 'user', content: String(body.prompt) });
+      return sendJson(res, 201, { dispatched: 'transcript', ...r });
+    }
+    if (event === 'Stop' && body.last_assistant_message != null) {
+      const r = db.insertTranscript({
+        ...common, role: 'assistant', content: String(body.last_assistant_message),
+      });
+      return sendJson(res, 201, { dispatched: 'transcript', ...r });
+    }
+    if (event === 'PostToolUse' && FILE_OP_TOOLS.has(body.tool_name)) {
+      // Extract file_path across tool variants:
+      //   Edit/Write:     tool_input.file_path
+      //   NotebookEdit:   tool_input.notebook_path
+      //   MultiEdit:      tool_input.file_path (top-level) — spec has both
+      //                   a top-level file_path AND an edits[] array.
+      //                   If a future version ever drops the top-level, the
+      //                   third fallback picks up edits[0].file_path.
+      const ti = body.tool_input || {};
+      const filePath =
+        ti.file_path ||
+        ti.notebook_path ||
+        (Array.isArray(ti.edits) && ti.edits[0] && ti.edits[0].file_path) ||
+        null;
+      const r = db.insertFileOp({
+        session_id,
+        tool_name: body.tool_name,
+        file_path: filePath,
+        tool_input: body.tool_input ?? null,
+        tool_use_id: body.tool_use_id ?? null,
+      });
+      return sendJson(res, 201, { dispatched: 'file-op', ...r });
+    }
+    // Event accepted but not of interest (PreToolUse of Bash, SessionStart, …)
+    sendJson(res, 200, { dispatched: 'ignored', event });
+  } catch (e) {
+    console.error('[api/hook]', event, e);
+    sendError(res, 500, 'hook_dispatch_failed', e.message || 'hook dispatch error');
+  }
 });
 
 // ── helpers ──────────────────────────────────────────────────────────

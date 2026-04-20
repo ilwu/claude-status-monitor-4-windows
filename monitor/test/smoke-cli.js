@@ -201,15 +201,16 @@ async function runTests() {
     assert.match(r.stdout, /snapshot_seq=1/);
   });
 
-  await step('recovery --session=<id> → Markdown bundle', async () => {
+  await step('recovery --session=<id> → Markdown bundle (Phase 7 sections)', async () => {
     const r = await spawnMmsg(['recovery', `--session=${SID}`]);
     assert.strictEqual(r.code, 0, r.stderr);
     assert.match(r.stdout, new RegExp(`# Recovery for ${SID}`));
     assert.match(r.stdout, /Latest snapshot/);
     assert.match(r.stdout, /current_task/);
-    assert.match(r.stdout, /Recent prompts/);
-    assert.match(r.stdout, /Recent file edits/);
-    assert.match(r.stdout, /a\.js|C:\/x\.js/);
+    // Phase 7 sections always rendered (even when empty)
+    assert.match(r.stdout, /Recent transcripts/);
+    assert.match(r.stdout, /Recent file ops/);
+    assert.match(r.stdout, /Latest summary/);
   });
 
   await step('recovery --json → JSON instead of markdown', async () => {
@@ -224,6 +225,130 @@ async function runTests() {
     const r = await spawnMmsg(['recovery', '--session=nope-not-real']);
     assert.strictEqual(r.code, 1);
     assert.match(r.stderr, /session not found/);
+  });
+
+  // ── Phase 7: record + session subcommands ──────────────────────
+  const P7SID = 'cli-p7-session';
+  const P7CWD = 'C:/cli-p7/workspace';
+
+  await step('record-transcript (missing flags) → exit 2', async () => {
+    const r = await spawnMmsg(['record-transcript'], { stdin: 'x' });
+    assert.strictEqual(r.code, 2);
+  });
+
+  await step('record-transcript (bad role) → exit 2', async () => {
+    const r = await spawnMmsg(
+      ['record-transcript', `--session=${P7SID}`, '--role=system'],
+      { stdin: 'x' }
+    );
+    assert.strictEqual(r.code, 2);
+  });
+
+  await step('record-transcript (no stdin) → exit 2', async () => {
+    const r = await spawnMmsg(
+      ['record-transcript', `--session=${P7SID}`, '--role=user']
+    );
+    assert.strictEqual(r.code, 2);
+  });
+
+  await step('record-transcript user → ok seq=1', async () => {
+    const r = await spawnMmsg(
+      ['record-transcript', `--session=${P7SID}`, '--role=user', `--cwd=${P7CWD}`],
+      { stdin: 'CLI phase-7 test prompt' }
+    );
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.match(r.stdout, /seq=1/);
+  });
+
+  await step('record-transcript assistant → ok seq=2', async () => {
+    const r = await spawnMmsg(
+      ['record-transcript', `--session=${P7SID}`, '--role=assistant', `--cwd=${P7CWD}`],
+      { stdin: 'CLI phase-7 test response' }
+    );
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.match(r.stdout, /seq=2/);
+  });
+
+  await step('record-file-op → ok seq', async () => {
+    const r = await spawnMmsg(
+      ['record-file-op', `--session=${P7SID}`, '--tool=Edit',
+       '--file=C:/cli-p7/x.ts', '--tool-use-id=toolu_cli_p7_1'],
+      { stdin: '{"old_string":"a","new_string":"b"}' }
+    );
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.match(r.stdout, /seq=1/);
+  });
+
+  await step('record-file-op (bad stdin JSON) → exit 2', async () => {
+    const r = await spawnMmsg(
+      ['record-file-op', `--session=${P7SID}`, '--tool=Edit'],
+      { stdin: 'not-json' }
+    );
+    assert.strictEqual(r.code, 2);
+  });
+
+  await step('summary (no stdin) → exit 2', async () => {
+    const r = await spawnMmsg([
+      'summary', `--session=${P7SID}`, '--from-seq=1', '--to-seq=2',
+    ]);
+    assert.strictEqual(r.code, 2);
+  });
+
+  await step('summary (no text in JSON) → exit 2', async () => {
+    const r = await spawnMmsg(
+      ['summary', `--session=${P7SID}`, '--from-seq=1', '--to-seq=2'],
+      { stdin: '{"keywords":["x"]}' }
+    );
+    assert.strictEqual(r.code, 2);
+  });
+
+  await step('summary → ok', async () => {
+    const r = await spawnMmsg(
+      ['summary', `--session=${P7SID}`, '--from-seq=1', '--to-seq=2',
+       '--generated-by=cli-smoke'],
+      { stdin: '{"text":"CLI summary for range 1-2","keywords":["cli","p7"]}' }
+    );
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.match(r.stdout, /range=1:2/);
+  });
+
+  await step('session-list → includes our P7 session', async () => {
+    const r = await spawnMmsg(['session-list']);
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert(r.stdout.includes(P7SID));
+  });
+
+  await step('session-list --cwd filters', async () => {
+    const r = await spawnMmsg(['session-list', `--cwd=${P7CWD}`]);
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert(r.stdout.includes(P7SID));
+  });
+
+  await step('session-search → finds summary', async () => {
+    const r = await spawnMmsg(['session-search', 'cli']);
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert(r.stdout.includes(P7SID));
+  });
+
+  await step('session-search (no hits) → friendly', async () => {
+    const r = await spawnMmsg(['session-search', 'no-such-keyword-xyz-1234']);
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.match(r.stdout, /no summary matches/);
+  });
+
+  await step('session-show → transcripts + file_ops interleaved', async () => {
+    const r = await spawnMmsg(['session-show', P7SID]);
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.match(r.stdout, /Session: cli-p7-session/);
+    assert.match(r.stdout, /USER/);
+    assert.match(r.stdout, /ASSISTANT/);
+    assert.match(r.stdout, /Edit.*x\.ts/);
+  });
+
+  await step('session-show (unknown) → empty message', async () => {
+    const r = await spawnMmsg(['session-show', 'no-such-session']);
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.match(r.stdout, /no transcripts or file_ops/);
   });
 
   // ── server unreachable → exit 3 ────────────────────────────────
