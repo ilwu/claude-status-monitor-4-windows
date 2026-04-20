@@ -45,3 +45,13 @@ echo '{"session_id":"test",...}' | bash statusline/statusline.sh
 ## Statusline JSON 可用欄位
 
 已使用和未使用的欄位見 README。要看實際 JSON 結構，執行上面的截取方法或讀 `/tmp/sl-last-input.json`（如果之前截取過）。
+
+---
+
+## Rules（協作模式規範）
+
+本專案除了是工具，也是「多 session 發包協作模式」的基礎設施。協作規則沉澱在：
+
+- [`docs/rules/multi-session-dispatch.md`](docs/rules/multi-session-dispatch.md) — 多 session 發包協作（Type 1 / Type 2 topic、4 段回報格式、Race 處理、全新使用者落地流程）
+
+這份 rules **跨專案通用**。使用 Minitor 的其他專案可在自己的 CLAUDE.md 引用此文件，專案內文件只寫「具體落地細節」（必讀 guide 清單、業務規範等）。

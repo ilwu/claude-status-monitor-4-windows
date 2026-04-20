@@ -137,18 +137,67 @@ sub-session（執行）
 
 ## 五、Sub-session 回報格式（強制）
 
+Sub-session 有**兩種輸出**，**都要帶 topic id**：
+
+### 5.1 mmsg topic-add 訊息（跨 session 傳遞）
+
 ```markdown
 # [t-xxxxxxxx] P? 狀態 — 1 句摘要
 
 （接正文，照發包 prompt 指定的結構）
 ```
 
-### 必要元素
-- **標題行**：`# [topic-id] P? 完成/中途請示 — 摘要`
-- **改動檔案清單**（後端 / 前端分列）
-- **驗收數字**（tsc / 測試 / build）
-- **偏離設計文件**（有則說明，沒有寫「無」）
-- **下一步預告**
+必要元素：
+- 標題行：`# [topic-id] P? 完成/中途請示 — 摘要`
+- 改動檔案清單（後端 / 前端分列）
+- 驗收數字（tsc / 測試 / build）
+- 偏離設計文件（有則說明，沒有寫「無」）
+- 下一步預告
+
+### 5.2 Sub-session 對「自己 Claude 介面」的階段回報輸出（新，2026-04-20）
+
+Sub-session 在自己 Claude Code 對話介面輸出「階段回報」文字時（給使用者看的 `●` 符號那條訊息），**也要帶 topic id**。
+
+**原因**：使用者看 sub-session 自己介面，若要把回報轉貼給主 session，介面文字沒 topic id 就無法快速定位。
+
+**格式**（擇一）：
+
+```
+● [t-xxxxxxxx] P? 完成：摘要
+```
+
+或：
+
+```
+● P? 完成（t-xxxxxxxx seq=N）：摘要
+```
+
+**反例**：
+
+```
+● P3 完成（seq=8）：Controller + Module + AdminModule 註冊 + tsc 0。
+```
+
+**問題**：seq=8 給了但沒 topic id，使用者要翻找是哪個 topic。
+
+**正確**：
+
+```
+● [t-7ebdd5ab] P3 完成：Controller + Module + AdminModule 註冊 + tsc 0。
+```
+
+### 5.3 觸發時機（對自己 Claude 介面）
+
+Sub-session 在以下時機對自己介面輸出都要帶 topic id：
+- Phase 完成宣告
+- 中途請示
+- 錯誤 / 警告回報
+- 發送 mmsg topic-add 前後的「我做了什麼」總結
+
+不需要標的：
+- 執行單一 tool 的中間輸出（Read / Grep 結果）
+- 思考 / 規劃過程
+- 不涉及「使用者轉貼」的細節對話
 
 ---
 
