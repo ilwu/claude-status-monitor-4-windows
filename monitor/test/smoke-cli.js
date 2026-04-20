@@ -29,10 +29,16 @@ const server = http.createServer((req, res) => {
   res.writeHead(404); res.end('{}');
 });
 
-function spawnMmsg(args, { stdin, port } = {}) {
+function spawnMmsg(args, { stdin, port, enforceTitle = false } = {}) {
   return new Promise((resolve, reject) => {
+    const env = { ...process.env, MINITOR_PORT: String(port ?? server.address().port) };
+    // Most smoke tests predate the topic-add title-format enforcement and
+    // use short ad-hoc stdin ('body', 'third', etc.). Skip the check by
+    // default so those tests keep validating the protocol/API shape; pass
+    // enforceTitle=true in new tests that specifically exercise the check.
+    if (!enforceTitle) env.MINITOR_SKIP_TITLE_CHECK = '1';
     const child = spawn(process.execPath, [CLI_PATH, ...args], {
-      env: { ...process.env, MINITOR_PORT: String(port ?? server.address().port) },
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const out = [], err = [];
@@ -117,6 +123,36 @@ async function runTests() {
     );
     assert.strictEqual(r.code, 0, r.stderr);
     assert.match(r.stdout, /ok seq=1/); // first message in topicA (no first_message at create)
+  });
+
+  await step('topic-add enforces title format by default → rejects plain content', async () => {
+    const r = await spawnMmsg(
+      ['topic-add', topicId, '--author=x'],
+      { stdin: 'no title line here', enforceTitle: true }
+    );
+    assert.strictEqual(r.code, 2);
+    assert.match(r.stderr, /first line must follow/);
+    assert.match(r.stderr, /Expected: # \[t-/);
+  });
+
+  await step('topic-add accepts content with compliant title', async () => {
+    const r = await spawnMmsg(
+      ['topic-add', topicId, '--author=x'],
+      { stdin: `# [${topicId}] title-compliant body\nactual content here`,
+        enforceTitle: true }
+    );
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.match(r.stdout, /ok seq=/);
+  });
+
+  await step('topic-add bypasses title check when MINITOR_SKIP_TITLE_CHECK=1', async () => {
+    // Default spawnMmsg already sets the skip env; this exercises that path
+    const r = await spawnMmsg(
+      ['topic-add', topicId, '--author=x'],
+      { stdin: 'still not a compliant title' }
+    );
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.match(r.stdout, /ok seq=/);
   });
 
   await step('topic-add with no stdin → exit 2', async () => {

@@ -159,15 +159,33 @@ COMMANDS['topic-new'] = {
   },
 };
 
+// Enforced title format for sub-session topic-add replies — the main session
+// relies on this when tracking parallel topics and needs the topic-id visible
+// in the first line. Users can bypass with MINITOR_SKIP_TITLE_CHECK=1 for
+// ad-hoc or testing content that doesn't follow the convention.
+const TOPIC_TITLE_REGEX = /^# \[t-[a-f0-9]+\]\s+.+$/;
+
 COMMANDS['topic-add'] = {
   help: 'mmsg topic-add <topic-id> [--author=<s>] <stdin content>',
-  describe: 'Append a message to a topic. Content comes from stdin.',
+  describe: 'Append a message to a topic. Content comes from stdin. First line must match `# [t-xxxxxxxx] <summary>`.',
   async run(args) {
     const topicId = args._[1];
     if (!topicId) die(2, COMMANDS['topic-add'].help);
     const author = typeof args.flags.author === 'string' ? args.flags.author : null;
     const content = (await readStdin()).replace(/\s+$/, '');
     if (!content) die(2, `no content on stdin\n${COMMANDS['topic-add'].help}`);
+
+    if (!process_.env.MINITOR_SKIP_TITLE_CHECK) {
+      const firstLine = content.trimStart().split(/\r?\n/, 1)[0] || '';
+      if (!TOPIC_TITLE_REGEX.test(firstLine)) {
+        die(2,
+          'topic-add: first line must follow the cross-project title format.\n' +
+          '  Expected: # [t-xxxxxxxx] P? 狀態 — 摘要\n' +
+          '  Got:      ' + firstLine + '\n' +
+          '  (set MINITOR_SKIP_TITLE_CHECK=1 to bypass — use sparingly.)');
+      }
+    }
+
     const r = await apiRequest('POST', `/api/topics/${encodeURIComponent(topicId)}/messages`, {
       author, content,
     });
