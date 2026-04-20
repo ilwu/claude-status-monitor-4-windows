@@ -19,6 +19,7 @@
 
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
 const process_ = process;
 
 const PORT = parseInt(process_.env.MINITOR_PORT, 10) || 19823;
@@ -419,6 +420,109 @@ function renderRecoveryMarkdown(bundle) {
   return out.join('\n') + '\n';
 }
 
+// ── rules subcommand (local filesystem — no HTTP) ──────────────────
+// `rules list` and `rules show` read docs/rules/*.md directly. The rules
+// directory is not a database; treating it as the single source of truth
+// avoids fragmentation (no copying into ~/.claude-monitor/, no register).
+
+function rulesDir() {
+  return process_.env.MINITOR_RULES_DIR
+    || path.resolve(__dirname, '..', '..', 'docs', 'rules');
+}
+
+// Lightweight YAML frontmatter parser — handles the flat key: value and
+// inline [a, b, c] forms we actually use. Nothing fancier. Returns
+// { meta, body }; body is the file content after the closing `---`.
+function parseFrontmatter(content) {
+  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!m) return { meta: {}, body: content };
+  const meta = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const km = line.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/);
+    if (!km) continue;
+    let val = km[2].trim();
+    const arrMatch = val.match(/^\[(.*)\]$/);
+    if (arrMatch) {
+      val = arrMatch[1].split(',').map(s => s.trim()).filter(Boolean);
+    }
+    meta[km[1]] = val;
+  }
+  return { meta, body: m[2] || '' };
+}
+
+function loadAllRules() {
+  const dir = rulesDir();
+  let entries;
+  try { entries = fs.readdirSync(dir); }
+  catch { return []; }
+  const rules = [];
+  for (const name of entries) {
+    if (!name.endsWith('.md')) continue;
+    if (name.toLowerCase() === 'readme.md') continue;
+    const fullPath = path.join(dir, name);
+    let content;
+    try { content = fs.readFileSync(fullPath, 'utf8'); }
+    catch { continue; }
+    const { meta, body } = parseFrontmatter(content);
+    if (!meta.name) continue; // require frontmatter to surface in listing
+    rules.push({ path: fullPath, meta, body, filename: name });
+  }
+  return rules;
+}
+
+COMMANDS['rules'] = {
+  help: 'mmsg rules list [--all] [--tag=<t>]  |  mmsg rules show <name> [--raw]',
+  describe: 'Browse Minitor cross-project rules (docs/rules/*.md).',
+  async run(args) {
+    const op = args._[1];
+    if (!op) die(2, COMMANDS['rules'].help);
+
+    if (op === 'list') {
+      const rules = loadAllRules();
+      let filtered = rules;
+      if (!args.flags.all) {
+        filtered = filtered.filter(r => (r.meta.status || 'active') !== 'deprecated');
+      }
+      if (args.flags.tag && typeof args.flags.tag === 'string') {
+        const tag = args.flags.tag;
+        filtered = filtered.filter(r => Array.isArray(r.meta['applies-to'])
+          && r.meta['applies-to'].includes(tag));
+      }
+      if (filtered.length === 0) {
+        process_.stdout.write('(no rules match)\n');
+        return;
+      }
+      const lines = [];
+      for (const r of filtered) {
+        const name = (r.meta.name || r.filename.replace(/\.md$/, '')).padEnd(30);
+        const scope = (r.meta.scope || '-').padEnd(14);
+        const status = (r.meta.status || 'active').padEnd(10);
+        const updated = (r.meta.updated || '-').padEnd(10);
+        const summary = r.meta.summary || '';
+        lines.push(`${name}  ${scope}  ${status}  ${updated}  ${summary}`);
+      }
+      process_.stdout.write(lines.join('\n') + '\n');
+      return;
+    }
+
+    if (op === 'show') {
+      const name = args._[2];
+      if (!name) die(2, COMMANDS['rules'].help);
+      const rule = loadAllRules().find(r => r.meta.name === name
+        || r.filename === name + '.md' || r.filename === name);
+      if (!rule) die(1, `rule not found: ${name}`);
+      if (args.flags.raw) {
+        process_.stdout.write(fs.readFileSync(rule.path, 'utf8'));
+      } else {
+        process_.stdout.write(rule.body.replace(/^\s*\n/, ''));
+      }
+      return;
+    }
+
+    die(2, `unknown rules operation: ${op}\n${COMMANDS['rules'].help}`);
+  },
+};
+
 // ── Phase 7: record / session subcommands ───────────────────────────
 
 COMMANDS['record-transcript'] = {
@@ -617,6 +721,7 @@ COMMANDS['help'] = {
                    'snapshot', 'recovery',
                    'record-transcript', 'record-file-op', 'summary',
                    'session-list', 'session-search', 'session-show',
+                   'rules',
                    'help'];
     for (const name of order) {
       lines.push(`  ${name.padEnd(12)} ${COMMANDS[name].describe}`);

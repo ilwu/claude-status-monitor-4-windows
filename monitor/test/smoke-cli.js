@@ -351,6 +351,129 @@ async function runTests() {
     assert.match(r.stdout, /no transcripts or file_ops/);
   });
 
+  // ── rules subcommand (no HTTP; reads MINITOR_RULES_DIR) ────────
+  const rulesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minitor-rules-'));
+  fs.writeFileSync(path.join(rulesDir, 'alpha.md'), [
+    '---',
+    'name: alpha',
+    'scope: all-projects',
+    'status: active',
+    'updated: 2026-04-20',
+    'applies-to: [smoke, alpha-tag]',
+    'summary: First rule for smoke test.',
+    '---',
+    '',
+    '# Alpha rule body',
+    'content goes here',
+  ].join('\n'));
+  fs.writeFileSync(path.join(rulesDir, 'beta.md'), [
+    '---',
+    'name: beta',
+    'scope: single-project',
+    'status: deprecated',
+    'updated: 2026-04-19',
+    'applies-to: [smoke, beta-tag]',
+    'summary: Deprecated rule for filter test.',
+    '---',
+    '',
+    '# Beta',
+  ].join('\n'));
+  // File without frontmatter — should be ignored
+  fs.writeFileSync(path.join(rulesDir, 'README.md'), '# index page\n');
+  fs.writeFileSync(path.join(rulesDir, 'loose.md'), '# no frontmatter here\n');
+
+  function spawnMmsgWithRulesDir(args, opts = {}) {
+    return spawnMmsg(args, {
+      ...opts,
+      env: { ...(opts.env || {}), MINITOR_RULES_DIR: rulesDir },
+    });
+  }
+
+  await step('rules list (default) → active only, excludes README + no-frontmatter', async () => {
+    const child = spawn(process.execPath, [CLI_PATH, 'rules', 'list'], {
+      env: { ...process.env, MINITOR_PORT: String(server.address().port),
+             MINITOR_RULES_DIR: rulesDir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const out = [];
+    child.stdout.on('data', c => out.push(c));
+    await new Promise(res => child.on('close', res));
+    const stdout = Buffer.concat(out).toString('utf8');
+    assert(stdout.includes('alpha'));
+    assert(!stdout.includes('beta'), 'deprecated hidden by default');
+    assert(!stdout.includes('index page'), 'README ignored');
+    assert(!stdout.includes('no frontmatter here'), 'loose file ignored');
+  });
+
+  await step('rules list --all → includes deprecated', async () => {
+    const child = spawn(process.execPath, [CLI_PATH, 'rules', 'list', '--all'], {
+      env: { ...process.env, MINITOR_RULES_DIR: rulesDir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const out = [];
+    child.stdout.on('data', c => out.push(c));
+    await new Promise(res => child.on('close', res));
+    const stdout = Buffer.concat(out).toString('utf8');
+    assert(stdout.includes('alpha'));
+    assert(stdout.includes('beta'));
+  });
+
+  await step('rules list --tag=alpha-tag → only alpha', async () => {
+    const child = spawn(process.execPath, [CLI_PATH, 'rules', 'list', '--tag=alpha-tag'], {
+      env: { ...process.env, MINITOR_RULES_DIR: rulesDir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const out = [];
+    child.stdout.on('data', c => out.push(c));
+    await new Promise(res => child.on('close', res));
+    const stdout = Buffer.concat(out).toString('utf8');
+    assert(stdout.includes('alpha'));
+    assert(!stdout.includes('beta'));
+  });
+
+  await step('rules show <name> → body without frontmatter', async () => {
+    const child = spawn(process.execPath, [CLI_PATH, 'rules', 'show', 'alpha'], {
+      env: { ...process.env, MINITOR_RULES_DIR: rulesDir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const out = [];
+    child.stdout.on('data', c => out.push(c));
+    await new Promise(res => child.on('close', res));
+    const stdout = Buffer.concat(out).toString('utf8');
+    assert(stdout.includes('Alpha rule body'));
+    assert(!stdout.includes('name: alpha'), 'frontmatter stripped');
+  });
+
+  await step('rules show <name> --raw → includes frontmatter', async () => {
+    const child = spawn(process.execPath, [CLI_PATH, 'rules', 'show', 'alpha', '--raw'], {
+      env: { ...process.env, MINITOR_RULES_DIR: rulesDir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const out = [];
+    child.stdout.on('data', c => out.push(c));
+    await new Promise(res => child.on('close', res));
+    const stdout = Buffer.concat(out).toString('utf8');
+    assert(stdout.includes('name: alpha'));
+    assert(stdout.includes('Alpha rule body'));
+  });
+
+  await step('rules show (unknown) → exit 1', async () => {
+    const child = spawn(process.execPath, [CLI_PATH, 'rules', 'show', 'nope'], {
+      env: { ...process.env, MINITOR_RULES_DIR: rulesDir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const err = [];
+    child.stderr.on('data', c => err.push(c));
+    const code = await new Promise(res => child.on('close', res));
+    assert.strictEqual(code, 1);
+    assert.match(Buffer.concat(err).toString('utf8'), /rule not found/);
+  });
+
+  await step('rules (no op) → exit 2', async () => {
+    const r = await spawnMmsg(['rules']);
+    assert.strictEqual(r.code, 2);
+  });
+
   // ── server unreachable → exit 3 ────────────────────────────────
   await step('server unreachable → exit 3 + friendly error', async () => {
     const r = await spawnMmsg(['topic-list'], { port: 1 });
