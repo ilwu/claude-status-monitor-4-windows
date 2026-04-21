@@ -471,6 +471,81 @@ async function runTests() {
     assert.match(r.stdout, /no transcripts or file_ops/);
   });
 
+  // ── topic-inbox + --master flag ────────────────────────────────
+  await step('topic-add --master tags is_master=1', async () => {
+    const create = await spawnMmsg(['topic-new', '--title=master tag test']);
+    const tid = create.stdout.trim();
+    // sub reply (default)
+    await spawnMmsg(['topic-add', tid, '--author=sub'], {
+      stdin: `# [${tid}] sub P1 — worked`,
+    });
+    // master reply (explicit)
+    await spawnMmsg(['topic-add', tid, '--author=main', '--master'], {
+      stdin: `# [${tid}] main ack`,
+    });
+    const show = await spawnMmsg(['topic-show', tid]);
+    // topic-show output contains both; verify DB stored is_master via inbox query
+    const inbox = await spawnMmsg(['topic-inbox']);
+    // last message is master → should be in_flight, not awaiting_main
+    const awaitingSection = inbox.stdout.split('=== In-flight')[0];
+    const inFlightSection = inbox.stdout.split('=== In-flight')[1] || '';
+    assert(!awaitingSection.includes(tid), 'master-last topic not in awaiting section');
+    assert(inFlightSection.includes(tid), 'master-last topic should be in in_flight section');
+  });
+
+  await step('topic-new --master tags first_message is_master=1', async () => {
+    const create = await spawnMmsg(
+      ['topic-new', '--title=master opens', '--author=main', '--master'],
+      { stdin: 'opening by main' }
+    );
+    const tid = create.stdout.trim();
+    const inbox = await spawnMmsg(['topic-inbox']);
+    const inFlightSection = inbox.stdout.split('=== In-flight')[1] || '';
+    assert(inFlightSection.includes(tid),
+      'master-created topic with first_message should be in_flight (main replied last)');
+  });
+
+  await step('topic-inbox zero parameters (no query string on URL)', async () => {
+    const r = await spawnMmsg(['topic-inbox']);
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.match(r.stdout, /=== Awaiting your response \(\d+\) ===/);
+    assert.match(r.stdout, /=== In-flight \(sub-session's turn\) \(\d+\) ===/);
+  });
+
+  await step('topic-inbox --json emits structured sections', async () => {
+    const r = await spawnMmsg(['topic-inbox', '--json']);
+    assert.strictEqual(r.code, 0, r.stderr);
+    const parsed = JSON.parse(r.stdout);
+    assert(Array.isArray(parsed.awaiting_main));
+    assert(Array.isArray(parsed.in_flight));
+  });
+
+  await step('topic-inbox: sub-last topic appears in awaiting_main', async () => {
+    const create = await spawnMmsg(['topic-new', '--title=sub will reply']);
+    const tid = create.stdout.trim();
+    await spawnMmsg(['topic-add', tid, '--author=main', '--master'], {
+      stdin: `# [${tid}] main question`,
+    });
+    await spawnMmsg(['topic-add', tid, '--author=worker'], {
+      stdin: `# [${tid}] sub reply`,
+    });
+    const inbox = await spawnMmsg(['topic-inbox']);
+    const awaitingSection = inbox.stdout.split('=== In-flight')[0];
+    assert(awaitingSection.includes(tid));
+  });
+
+  await step('topic-inbox hides closed topics', async () => {
+    const create = await spawnMmsg(['topic-new', '--title=to-close']);
+    const tid = create.stdout.trim();
+    await spawnMmsg(['topic-add', tid, '--author=sub'], {
+      stdin: `# [${tid}] sub done`,
+    });
+    // Close the topic via direct API call (no CLI for this in scope here)
+    await httpPost(`/api/topics/${tid}/close`, {});
+    const inbox = await spawnMmsg(['topic-inbox']);
+    assert(!inbox.stdout.includes(tid), 'closed topic must not show in inbox');
+  });
+
   // ── rules subcommand (no HTTP; reads MINITOR_RULES_DIR) ────────
   const rulesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minitor-rules-'));
   fs.writeFileSync(path.join(rulesDir, 'alpha.md'), [

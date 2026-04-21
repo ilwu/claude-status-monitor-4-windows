@@ -505,6 +505,101 @@ async function runTests() {
     assert.strictEqual(r.body.error.code, 'not_found');
   });
 
+  // ── GET /api/topics/master/inbox (inbox dashboard) ─────────────
+  await step('POST message with is_master=true stores is_master flag', async () => {
+    const created = await request('POST', '/api/topics', { title: 'inbox api master tag' });
+    const tid = created.body.id;
+    const r = await request('POST', `/api/topics/${tid}/messages`, {
+      content: 'master message', author: 'main', is_master: true,
+    });
+    assert.strictEqual(r.status, 201);
+    // Verify via GET (topic-show returns messages array)
+    const show = await request('GET', `/api/topics/${tid}`);
+    const msg = show.body.messages.find(m => m.content === 'master message');
+    assert(msg);
+    assert.strictEqual(msg.is_master, 1);
+  });
+
+  await step('POST /api/topics with is_master on first_message', async () => {
+    const r = await request('POST', '/api/topics', {
+      title: 'master opens',
+      first_message: 'opening by master',
+      author: 'main',
+      is_master: true,
+    });
+    assert.strictEqual(r.status, 201);
+    const show = await request('GET', `/api/topics/${r.body.id}`);
+    assert.strictEqual(show.body.messages[0].is_master, 1);
+  });
+
+  await step('GET /api/topics/master/inbox → two-section response', async () => {
+    const r = await request('GET', '/api/topics/master/inbox');
+    assert.strictEqual(r.status, 200);
+    assert(Array.isArray(r.body.awaiting_main), 'awaiting_main should be array');
+    assert(Array.isArray(r.body.in_flight), 'in_flight should be array');
+    // Must be zero-parameter — no query string needed
+    // (a filter param would create noise; the business view must stay simple)
+  });
+
+  await step('inbox: topic whose last message is sub → awaiting_main', async () => {
+    const created = await request('POST', '/api/topics', { title: 'inbox-awaiting' });
+    const tid = created.body.id;
+    await request('POST', `/api/topics/${tid}/messages`, {
+      content: 'master q', author: 'main', is_master: true,
+    });
+    await request('POST', `/api/topics/${tid}/messages`, {
+      content: 'sub reply', author: 'sub', is_master: false,
+    });
+    const inbox = await request('GET', '/api/topics/master/inbox');
+    const awaitingIds = inbox.body.awaiting_main.map(x => x.topic_id);
+    const inFlightIds = inbox.body.in_flight.map(x => x.topic_id);
+    assert(awaitingIds.includes(tid));
+    assert(!inFlightIds.includes(tid));
+  });
+
+  await step('inbox: topic whose last message is master → in_flight', async () => {
+    const created = await request('POST', '/api/topics', { title: 'inbox-inflight' });
+    const tid = created.body.id;
+    await request('POST', `/api/topics/${tid}/messages`, {
+      content: 'sub ping', author: 'sub', is_master: false,
+    });
+    await request('POST', `/api/topics/${tid}/messages`, {
+      content: 'master ack', author: 'main', is_master: true,
+    });
+    const inbox = await request('GET', '/api/topics/master/inbox');
+    const inFlightIds = inbox.body.in_flight.map(x => x.topic_id);
+    const awaitingIds = inbox.body.awaiting_main.map(x => x.topic_id);
+    assert(inFlightIds.includes(tid));
+    assert(!awaitingIds.includes(tid));
+  });
+
+  await step('inbox: closed topic excluded from both sections', async () => {
+    const created = await request('POST', '/api/topics', { title: 'inbox-closed' });
+    const tid = created.body.id;
+    await request('POST', `/api/topics/${tid}/messages`, {
+      content: 'done', author: 'sub', is_master: false,
+    });
+    await request('POST', `/api/topics/${tid}/close`, {});
+    const inbox = await request('GET', '/api/topics/master/inbox');
+    const all = [...inbox.body.awaiting_main, ...inbox.body.in_flight].map(x => x.topic_id);
+    assert(!all.includes(tid), 'closed topic must not appear in inbox');
+  });
+
+  await step('inbox: each entry carries latest message metadata', async () => {
+    const created = await request('POST', '/api/topics', { title: 'inbox-metadata' });
+    const tid = created.body.id;
+    await request('POST', `/api/topics/${tid}/messages`, {
+      content: 'from reporter', author: 'test-reporter', is_master: false,
+    });
+    const inbox = await request('GET', '/api/topics/master/inbox');
+    const entry = inbox.body.awaiting_main.find(x => x.topic_id === tid);
+    assert(entry);
+    assert.strictEqual(entry.title, 'inbox-metadata');
+    assert.strictEqual(entry.latest_author, 'test-reporter');
+    assert.strictEqual(entry.latest_is_master, 0);
+    assert(typeof entry.latest_at === 'number');
+  });
+
   await step('PUT summary bumps topics.updated_at', async () => {
     const before = await request('GET', `/api/topics/${summaryTopic}`);
     const beforeTs = before.body.topic.updated_at;

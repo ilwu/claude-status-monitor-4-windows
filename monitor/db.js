@@ -101,7 +101,8 @@ function migrate() {
       seq        INTEGER,
       author     TEXT,
       content    TEXT,
-      created_at INTEGER
+      created_at INTEGER,
+      is_master  INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_topic_messages ON topic_messages(topic_id, seq);
 
@@ -166,6 +167,12 @@ function migrate() {
   addColumnIfMissing('topics', 'current_summary',            'TEXT');
   addColumnIfMissing('topics', 'current_summary_updated_at', 'INTEGER');
   addColumnIfMissing('topics', 'current_summary_updated_by', 'TEXT');
+
+  // Add is_master to topic_messages (existing rows default 0 — consistent
+  // with "pre-concept messages are non-master by default"). Main-session
+  // starts tagging new messages going forward; the inbox view gradually
+  // becomes accurate as the conversation flows.
+  addColumnIfMissing('topic_messages', 'is_master', 'INTEGER NOT NULL DEFAULT 0');
 }
 
 function addColumnIfMissing(table, column, type) {
@@ -338,7 +345,7 @@ function listTopics({ status = null, limit = 50, since_ms = null } = {}) {
 }
 
 // Create topic + first message atomically (both live or neither).
-function createTopicWithFirstMessage({ title = null, author = null, content, status = 'active' }) {
+function createTopicWithFirstMessage({ title = null, author = null, content, status = 'active', is_master = false }) {
   if (content == null) throw new Error('content required');
   const tx = db.transaction(() => {
     const now = Date.now();
@@ -359,15 +366,72 @@ function createTopicWithFirstMessage({ title = null, author = null, content, sta
     }
     if (!id) throw new Error('failed to generate unique topic id after 5 attempts');
     const r = db.prepare(`
-      INSERT INTO topic_messages (topic_id, seq, author, content, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(id, 1, author, String(content), now);
+      INSERT INTO topic_messages (topic_id, seq, author, content, created_at, is_master)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, 1, author, String(content), now, is_master ? 1 : 0);
     return {
       topic: getTopic(id),
       message: { id: r.lastInsertRowid, seq: 1 },
     };
   });
   return tx();
+}
+
+// Main-session inbox: a zero-parameter business view. Returns every
+// active topic split into two groups by who sent the last message:
+//   awaiting_main — last message was NOT from main-session (sub-session's
+//                   reply is the tail; main-session should pick up)
+//   in_flight     — last message WAS from main-session (awaiting sub
+//                   to continue, or simply parked)
+//
+// Topics with zero messages count as in_flight (nothing to ack). Closed
+// topics are excluded entirely; use mmsg topic-list --status=closed for
+// that. The union of both groups equals all active topics.
+function listMasterInbox() {
+  // CTE + ROW_NUMBER window function to pick the latest message per topic
+  // in a single scan. The three fields (seq / author / is_master) are
+  // guaranteed to come from the same row — previously three separate
+  // correlated subqueries each resolved `ORDER BY seq DESC LIMIT 1`
+  // independently, which was correct only because insertTopicMessage
+  // transactionally guarantees unique (topic_id, seq); the CTE makes
+  // the invariant explicit in the SQL itself. Window functions require
+  // SQLite 3.25+ (2018); better-sqlite3 bundles its own recent SQLite.
+  const rows = db.prepare(`
+    WITH latest AS (
+      SELECT topic_id, seq, author, is_master FROM (
+        SELECT topic_id, seq, author, is_master,
+               ROW_NUMBER() OVER (PARTITION BY topic_id ORDER BY seq DESC) AS rn
+        FROM topic_messages
+      ) WHERE rn = 1
+    )
+    SELECT
+      t.id         AS topic_id,
+      t.title      AS title,
+      t.updated_at AS latest_at,
+      l.seq        AS latest_seq,
+      l.author     AS latest_author,
+      l.is_master  AS latest_is_master
+    FROM topics t
+    LEFT JOIN latest l ON l.topic_id = t.id
+    WHERE t.status = 'active'
+    ORDER BY t.updated_at DESC
+  `).all();
+
+  const awaiting_main = [];
+  const in_flight = [];
+  for (const r of rows) {
+    // latest_is_master = 1 → main already replied last (in_flight)
+    // latest_is_master = 0 or null (no messages) → awaiting_main unless empty
+    if (r.latest_seq == null) {
+      // Topic with no messages: nothing to ack → in_flight
+      in_flight.push(r);
+    } else if (r.latest_is_master === 1) {
+      in_flight.push(r);
+    } else {
+      awaiting_main.push(r);
+    }
+  }
+  return { awaiting_main, in_flight };
 }
 
 function closeTopic(id) {
@@ -406,7 +470,7 @@ function setTopicSummary(id, { content, author = null, ts = null }) {
 }
 
 // ── topic_messages DAO ───────────────────────────────────────────────
-function insertTopicMessage({ topic_id, author = null, content, created_at = null }) {
+function insertTopicMessage({ topic_id, author = null, content, created_at = null, is_master = false }) {
   if (!topic_id) throw new Error('topic_id required');
   if (content == null) throw new Error('content required');
   const now = created_at ?? Date.now();
@@ -418,9 +482,9 @@ function insertTopicMessage({ topic_id, author = null, content, created_at = nul
       'SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM topic_messages WHERE topic_id = ?'
     ).get(topic_id).next;
     const r = db.prepare(`
-      INSERT INTO topic_messages (topic_id, seq, author, content, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(topic_id, nextSeq, author, String(content), now);
+      INSERT INTO topic_messages (topic_id, seq, author, content, created_at, is_master)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(topic_id, nextSeq, author, String(content), now, is_master ? 1 : 0);
     db.prepare('UPDATE topics SET updated_at = ? WHERE id = ?').run(now, topic_id);
     return { id: r.lastInsertRowid, seq: nextSeq };
   });
@@ -761,6 +825,7 @@ module.exports = {
   createTopicWithFirstMessage,
   getTopic,
   listTopics,
+  listMasterInbox,
   closeTopic,
   setTopicSummary,
 

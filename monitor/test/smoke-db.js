@@ -213,6 +213,82 @@ function runDaoTests() {
     assert.strictEqual(row.current_summary_updated_by, null);
   });
 
+  // ── is_master + master inbox (topic-inbox feature) ─────────────
+  step('insertTopicMessage stores is_master (default 0, explicit 1)', () => {
+    const t = db.createTopic({ title: 'inbox test' });
+    db.insertTopicMessage({ topic_id: t.id, author: 'sub', content: 'subless' });
+    db.insertTopicMessage({ topic_id: t.id, author: 'main', content: 'main here', is_master: true });
+    const rows = db.listTopicMessages(t.id);
+    assert.strictEqual(rows.length, 2);
+    assert.strictEqual(rows[0].is_master, 0, 'default should be 0');
+    assert.strictEqual(rows[1].is_master, 1, 'explicit true → 1');
+  });
+
+  step('createTopicWithFirstMessage honors is_master flag', () => {
+    const r = db.createTopicWithFirstMessage({
+      title: 'master creates',
+      author: 'main',
+      content: 'opening by main',
+      is_master: true,
+    });
+    const msgs = db.listTopicMessages(r.topic.id);
+    assert.strictEqual(msgs[0].is_master, 1);
+  });
+
+  step('listMasterInbox splits by last message sender', () => {
+    // Seed three topics in known states
+    const awaiting = db.createTopic({ title: 'awaiting-main topic' });
+    db.insertTopicMessage({ topic_id: awaiting.id, author: 'main', content: 'q', is_master: true });
+    db.insertTopicMessage({ topic_id: awaiting.id, author: 'sub', content: 'reply', is_master: false });
+    // last is sub → awaiting_main
+
+    const inFlight = db.createTopic({ title: 'in-flight topic' });
+    db.insertTopicMessage({ topic_id: inFlight.id, author: 'sub', content: 'ping', is_master: false });
+    db.insertTopicMessage({ topic_id: inFlight.id, author: 'main', content: 'ack', is_master: true });
+    // last is main → in_flight
+
+    const empty = db.createTopic({ title: 'empty topic' });
+    // no messages → in_flight (nothing to ack)
+
+    const closed = db.createTopic({ title: 'closed topic' });
+    db.insertTopicMessage({ topic_id: closed.id, author: 'sub', content: 'was working', is_master: false });
+    db.closeTopic(closed.id);
+    // closed → excluded entirely
+
+    const inbox = db.listMasterInbox();
+    const awaitingIds = inbox.awaiting_main.map(x => x.topic_id);
+    const inFlightIds = inbox.in_flight.map(x => x.topic_id);
+    assert(awaitingIds.includes(awaiting.id), 'sub-last-reply topic should be in awaiting_main');
+    assert(!awaitingIds.includes(inFlight.id), 'main-last-reply topic should NOT be in awaiting_main');
+    assert(inFlightIds.includes(inFlight.id), 'main-last-reply → in_flight');
+    assert(inFlightIds.includes(empty.id), 'empty topic → in_flight (nothing to ack)');
+    assert(!awaitingIds.includes(closed.id) && !inFlightIds.includes(closed.id),
+      'closed topic excluded from both');
+  });
+
+  step('listMasterInbox returns latest message metadata', () => {
+    const t = db.createTopic({ title: 'metadata test' });
+    db.insertTopicMessage({ topic_id: t.id, author: 'sub-reporter', content: 'done p1', is_master: false });
+    const inbox = db.listMasterInbox();
+    const hit = inbox.awaiting_main.find(x => x.topic_id === t.id);
+    assert(hit, 'topic should be in awaiting_main');
+    assert.strictEqual(hit.title, 'metadata test');
+    assert.strictEqual(hit.latest_seq, 1);
+    assert.strictEqual(hit.latest_author, 'sub-reporter');
+    assert.strictEqual(hit.latest_is_master, 0);
+    assert(typeof hit.latest_at === 'number');
+  });
+
+  step('listMasterInbox: union equals all active topics', () => {
+    const inbox = db.listMasterInbox();
+    const total = inbox.awaiting_main.length + inbox.in_flight.length;
+    const activeCount = db.getDb().prepare(
+      "SELECT COUNT(*) AS n FROM topics WHERE status = 'active'"
+    ).get().n;
+    assert.strictEqual(total, activeCount,
+      `awaiting_main (${inbox.awaiting_main.length}) + in_flight (${inbox.in_flight.length}) must equal active topics (${activeCount})`);
+  });
+
   step('migration: ALTER TABLE idempotent on existing DB (simulate pre-migration)', () => {
     // Simulate a DB from before the summary columns existed: build a temp
     // DB with the OLD schema, then re-init() to run addColumnIfMissing.

@@ -229,8 +229,11 @@ router.post('/api/topics', async (req, res) => {
   const title = body.title ?? null;
   const author = body.author ?? null;
   const firstMessage = body.first_message;
+  const isMaster = !!body.is_master;
   if (firstMessage != null) {
-    const r = db.createTopicWithFirstMessage({ title, author, content: firstMessage });
+    const r = db.createTopicWithFirstMessage({
+      title, author, content: firstMessage, is_master: isMaster,
+    });
     return sendJson(res, 201, { id: r.topic.id, topic: r.topic, first_message: r.message });
   }
   const topic = db.createTopic({ title });
@@ -257,6 +260,16 @@ router.get('/api/topics', async (req, res, _params, query) => {
   sendJson(res, 200, db.listTopics({ status, limit, since_ms }));
 });
 
+// Main-session inbox — the single business entry point for "what should
+// main-session look at right now." Zero parameters by design: the DDD
+// business view, not a filtered query. Two sections:
+//   awaiting_main → last message was sub-session (main should reply)
+//   in_flight     → last message was main (sub-session should continue)
+// Registered before /:id routes to avoid being shadowed by dynamic match.
+router.get('/api/topics/master/inbox', async (req, res) => {
+  sendJson(res, 200, db.listMasterInbox());
+});
+
 router.post('/api/topics/:id/messages', async (req, res, params) => {
   const body = await readJsonBody(req);
   if (body.content == null) return sendError(res, 400, 'missing_field', 'content required');
@@ -265,6 +278,7 @@ router.post('/api/topics/:id/messages', async (req, res, params) => {
       topic_id: params.id,
       author: body.author ?? null,
       content: body.content,
+      is_master: !!body.is_master,
     });
     sendJson(res, 201, r);
   } catch (e) {

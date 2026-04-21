@@ -143,16 +143,20 @@ async function resolveSessionId(args) {
 const COMMANDS = {};
 
 COMMANDS['topic-new'] = {
-  help: 'mmsg topic-new --title=<s> [--author=<s>] [<stdin first message>]',
-  describe: 'Create a new topic. Prints the topic id on stdout.',
+  help: 'mmsg topic-new --title=<s> [--author=<s>] [--master] [<stdin first message>]',
+  describe: 'Create a new topic. Prints the topic id on stdout. --master tags the first_message as sent by main-session (for inbox routing).',
   async run(args) {
     const title = args.flags.title && typeof args.flags.title === 'string'
       ? args.flags.title
       : null;
     const author = typeof args.flags.author === 'string' ? args.flags.author : null;
+    const isMaster = args.flags.master === true;
     const stdin = (await readStdin()).trim();
     const body = { title, author };
-    if (stdin) body.first_message = stdin;
+    if (stdin) {
+      body.first_message = stdin;
+      if (isMaster) body.is_master = true;
+    }
     const r = await apiRequest('POST', '/api/topics', body);
     if (r.status !== 201) return apiErr(r, 'topic-new');
     process_.stdout.write(r.body.id + '\n');
@@ -166,12 +170,13 @@ COMMANDS['topic-new'] = {
 const TOPIC_TITLE_REGEX = /^# \[t-[a-f0-9]+\]\s+.+$/;
 
 COMMANDS['topic-add'] = {
-  help: 'mmsg topic-add <topic-id> [--author=<s>] <stdin content>',
-  describe: 'Append a message to a topic. Content comes from stdin. First line must match `# [t-xxxxxxxx] <summary>`.',
+  help: 'mmsg topic-add <topic-id> [--author=<s>] [--master] <stdin content>',
+  describe: 'Append a message to a topic. Content comes from stdin. First line must match `# [t-xxxxxxxx] <summary>`. --master tags message as sent by main-session (for inbox routing).',
   async run(args) {
     const topicId = args._[1];
     if (!topicId) die(2, COMMANDS['topic-add'].help);
     const author = typeof args.flags.author === 'string' ? args.flags.author : null;
+    const isMaster = args.flags.master === true;
     const content = (await readStdin()).replace(/\s+$/, '');
     if (!content) die(2, `no content on stdin\n${COMMANDS['topic-add'].help}`);
 
@@ -187,7 +192,7 @@ COMMANDS['topic-add'] = {
     }
 
     const r = await apiRequest('POST', `/api/topics/${encodeURIComponent(topicId)}/messages`, {
-      author, content,
+      author, content, is_master: isMaster,
     });
     if (r.status !== 201) return apiErr(r, 'topic-add');
     process_.stdout.write(`ok seq=${r.body.seq}\n`);
@@ -258,6 +263,42 @@ COMMANDS['topic-show'] = {
         out.push('  ' + line);
       }
       out.push('');
+    }
+    process_.stdout.write(out.join('\n') + '\n');
+  },
+};
+
+COMMANDS['topic-inbox'] = {
+  help: 'mmsg topic-inbox [--json]',
+  describe: 'Main-session inbox: what you need to respond to + what is still in flight. Zero parameters by design — the business view, not a query.',
+  async run(args) {
+    const r = await apiRequest('GET', '/api/topics/master/inbox');
+    if (r.status !== 200) return apiErr(r, 'topic-inbox');
+    if (args.flags.json) {
+      process_.stdout.write(JSON.stringify(r.body, null, 2) + '\n');
+      return;
+    }
+    const { awaiting_main, in_flight } = r.body;
+    const out = [];
+
+    const fmtEntry = t => {
+      const title = (t.title || '').slice(0, 48);
+      const author = t.latest_author ? `[${t.latest_author}]` : '[-]';
+      return `${t.topic_id}  ${fmtTs(t.latest_at)}  ${author}  ${title}`;
+    };
+
+    out.push(`=== Awaiting your response (${awaiting_main.length}) ===`);
+    if (awaiting_main.length === 0) {
+      out.push('(nothing pending)');
+    } else {
+      for (const t of awaiting_main) out.push(fmtEntry(t));
+    }
+    out.push('');
+    out.push(`=== In-flight (sub-session's turn) (${in_flight.length}) ===`);
+    if (in_flight.length === 0) {
+      out.push('(nothing in flight)');
+    } else {
+      for (const t of in_flight) out.push(fmtEntry(t));
     }
     process_.stdout.write(out.join('\n') + '\n');
   },
@@ -899,7 +940,7 @@ COMMANDS['help'] = {
       'Commands:',
     ];
     const order = ['topic-new', 'topic-add', 'topic-set-summary',
-                   'topic-show', 'topic-list',
+                   'topic-show', 'topic-list', 'topic-inbox',
                    'snapshot', 'recovery',
                    'record-transcript', 'record-file-op', 'summary',
                    'session-list', 'session-search', 'session-show',
