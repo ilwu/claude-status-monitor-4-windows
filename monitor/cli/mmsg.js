@@ -194,6 +194,26 @@ COMMANDS['topic-add'] = {
   },
 };
 
+COMMANDS['topic-set-summary'] = {
+  help: 'mmsg topic-set-summary <topic-id> [--author=<s>] <stdin content>',
+  describe: 'Overwrite a topic\'s current summary. Content (markdown) from stdin.',
+  async run(args) {
+    const topicId = args._[1];
+    if (!topicId) die(2, COMMANDS['topic-set-summary'].help);
+    const author = typeof args.flags.author === 'string' ? args.flags.author : null;
+    const content = (await readStdin()).replace(/\s+$/, '');
+    if (!content) die(2, `no content on stdin\n${COMMANDS['topic-set-summary'].help}`);
+    const r = await apiRequest('PUT',
+      `/api/topics/${encodeURIComponent(topicId)}/summary`,
+      { content, author });
+    if (r.status === 404) return die(1, `topic not found: ${topicId}`);
+    if (r.status !== 200) return apiErr(r, 'topic-set-summary');
+    const at = fmtTs(r.body.current_summary_updated_at);
+    const by = r.body.current_summary_updated_by || '-';
+    process_.stdout.write(`ok updated=${at} by=${by}\n`);
+  },
+};
+
 COMMANDS['topic-show'] = {
   help: 'mmsg topic-show <topic-id> [--latest=N] [--since=<seq>] [--summary]',
   describe: 'Print the full thread (or a slice of it).',
@@ -214,6 +234,20 @@ COMMANDS['topic-show'] = {
     if (topic.title) out.push(`Title:   ${topic.title}`);
     out.push(`Created: ${fmtTs(topic.created_at)}   Updated: ${fmtTs(topic.updated_at)}`);
     out.push(`Messages: ${messages.length}` + (args.flags.latest ? ` (latest ${args.flags.latest})` : ''));
+    // Topic-level "current summary" — when set, display between metadata
+    // and seq=1 so anyone scrolling topic-show sees the consolidated state
+    // first. Hidden entirely when never set (backward-compat).
+    if (topic.current_summary) {
+      const updatedAt = fmtTs(topic.current_summary_updated_at);
+      const by = topic.current_summary_updated_by
+        ? ` by ${topic.current_summary_updated_by}`
+        : '';
+      out.push('');
+      out.push(`📌 Summary (updated ${updatedAt}${by}):`);
+      for (const line of String(topic.current_summary).split('\n')) {
+        out.push(line);
+      }
+    }
     out.push('---');
     for (const m of messages) {
       const authorStr = m.author ? `[${m.author}]` : '[-]';
@@ -225,7 +259,7 @@ COMMANDS['topic-show'] = {
       }
       out.push('');
     }
-    process_.stdout.write(out.join('\n'));
+    process_.stdout.write(out.join('\n') + '\n');
   },
 };
 
@@ -864,7 +898,8 @@ COMMANDS['help'] = {
       '',
       'Commands:',
     ];
-    const order = ['topic-new', 'topic-add', 'topic-show', 'topic-list',
+    const order = ['topic-new', 'topic-add', 'topic-set-summary',
+                   'topic-show', 'topic-list',
                    'snapshot', 'recovery',
                    'record-transcript', 'record-file-op', 'summary',
                    'session-list', 'session-search', 'session-show',

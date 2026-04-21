@@ -454,6 +454,70 @@ async function runTests() {
     assert(ids.includes(topicB));
   });
 
+  // ── PUT /api/topics/:id/summary (topic-set-summary) ────────────
+  let summaryTopic = null;
+
+  await step('PUT /api/topics/:id/summary → 200 + all 3 summary columns', async () => {
+    const created = await request('POST', '/api/topics', { title: 'summary target' });
+    summaryTopic = created.body.id;
+    const r = await request('PUT', `/api/topics/${summaryTopic}/summary`, {
+      content: 'first summary content', author: 'main-scene',
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.current_summary, 'first summary content');
+    assert.strictEqual(r.body.current_summary_updated_by, 'main-scene');
+    assert(typeof r.body.current_summary_updated_at === 'number');
+  });
+
+  await step('PUT summary overwrites previous (no history)', async () => {
+    const r = await request('PUT', `/api/topics/${summaryTopic}/summary`, {
+      content: 'second summary', author: 'other-author',
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.current_summary, 'second summary');
+    assert.strictEqual(r.body.current_summary_updated_by, 'other-author');
+    // GET should reflect the overwrite too
+    const get = await request('GET', `/api/topics/${summaryTopic}`);
+    assert.strictEqual(get.body.topic.current_summary, 'second summary');
+  });
+
+  await step('PUT summary with null author (omit field) → stored null', async () => {
+    const r = await request('PUT', `/api/topics/${summaryTopic}/summary`, {
+      content: 'anonymous summary',
+    });
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.current_summary_updated_by, null);
+  });
+
+  await step('PUT summary missing content → 400', async () => {
+    const r = await request('PUT', `/api/topics/${summaryTopic}/summary`, {
+      author: 'no-content',
+    });
+    assert.strictEqual(r.status, 400);
+    assert.strictEqual(r.body.error.code, 'missing_field');
+  });
+
+  await step('PUT summary on unknown topic → 404', async () => {
+    const r = await request('PUT', '/api/topics/t-nosuch/summary', {
+      content: 'whatever',
+    });
+    assert.strictEqual(r.status, 404);
+    assert.strictEqual(r.body.error.code, 'not_found');
+  });
+
+  await step('PUT summary bumps topics.updated_at', async () => {
+    const before = await request('GET', `/api/topics/${summaryTopic}`);
+    const beforeTs = before.body.topic.updated_at;
+    // ≥2ms wait so timestamp compare is meaningful
+    await new Promise(r => setTimeout(r, 5));
+    await request('PUT', `/api/topics/${summaryTopic}/summary`, {
+      content: 'timestamp bump test',
+    });
+    const after = await request('GET', `/api/topics/${summaryTopic}`);
+    assert(after.body.topic.updated_at > beforeTs,
+      `updated_at should advance (${before.body.topic.updated_at} → ${after.body.topic.updated_at})`);
+  });
+
   // ── Phase 7: record + session endpoints ────────────────────────
   const PSID = 'phase7-session-a';
   const PCWD = 'C:/phase7/workspace/a';

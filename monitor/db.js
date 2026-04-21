@@ -84,11 +84,14 @@ function migrate() {
     CREATE INDEX IF NOT EXISTS idx_snapshots_session_seq ON snapshots(session_id, snapshot_seq);
 
     CREATE TABLE IF NOT EXISTS topics (
-      id         TEXT PRIMARY KEY,
-      title      TEXT,
-      status     TEXT DEFAULT 'active',
-      created_at INTEGER,
-      updated_at INTEGER
+      id                         TEXT PRIMARY KEY,
+      title                      TEXT,
+      status                     TEXT DEFAULT 'active',
+      created_at                 INTEGER,
+      updated_at                 INTEGER,
+      current_summary            TEXT,
+      current_summary_updated_at INTEGER,
+      current_summary_updated_by TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_topics_updated ON topics(updated_at DESC);
 
@@ -155,6 +158,23 @@ function migrate() {
     CREATE INDEX IF NOT EXISTS idx_summaries_session_end
       ON summaries(session_id, range_end_seq);
   `);
+
+  // Additive column migrations — idempotent, safe on both fresh and
+  // existing DBs. CREATE TABLE IF NOT EXISTS above covers fresh DBs; for
+  // DBs created before a column existed, ALTER TABLE adds it. PRAGMA
+  // table_info is the standard-safe "does column exist" check.
+  addColumnIfMissing('topics', 'current_summary',            'TEXT');
+  addColumnIfMissing('topics', 'current_summary_updated_at', 'INTEGER');
+  addColumnIfMissing('topics', 'current_summary_updated_by', 'TEXT');
+}
+
+function addColumnIfMissing(table, column, type) {
+  // Identifiers are hardcoded module-internal constants, not user input,
+  // so string interpolation is safe here (PRAGMA also doesn't accept ?).
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some(c => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
 }
 
 // ── sessions DAO ─────────────────────────────────────────────────────
@@ -355,6 +375,34 @@ function closeTopic(id) {
     UPDATE topics SET status = 'closed', updated_at = ? WHERE id = ?
   `).run(Date.now(), id);
   return r.changes > 0;
+}
+
+// Topic-level "current summary" — a single always-overwritten freeform
+// string a coordinator session writes when consolidating the thread into
+// one paragraph for the next person to pick up. Distinct from seq-based
+// topic_messages (which accumulate). Bumps topics.updated_at so the topic
+// floats to the top of topic-list after a summary update.
+//
+// `ts` overrides the content-authored timestamp (for bulk re-import of
+// old summaries); topics.updated_at ALWAYS uses now so "last touched"
+// reflects the actual write time, not the authored time — otherwise
+// re-importing an old summary would make the topic sink below
+// topic-list --recent=... filters.
+function setTopicSummary(id, { content, author = null, ts = null }) {
+  if (!id) throw new Error('topic id required');
+  if (content == null) throw new Error('content required');
+  const summaryTs = ts ?? Date.now();
+  const touchedAt = Date.now();
+  const r = db.prepare(`
+    UPDATE topics SET
+      current_summary            = ?,
+      current_summary_updated_at = ?,
+      current_summary_updated_by = ?,
+      updated_at                 = ?
+    WHERE id = ?
+  `).run(String(content), summaryTs, author, touchedAt, id);
+  if (r.changes === 0) throw new Error(`topic not found: ${id}`);
+  return getTopic(id);
 }
 
 // ── topic_messages DAO ───────────────────────────────────────────────
@@ -714,6 +762,7 @@ module.exports = {
   getTopic,
   listTopics,
   closeTopic,
+  setTopicSummary,
 
   insertTopicMessage,
   listTopicMessages,

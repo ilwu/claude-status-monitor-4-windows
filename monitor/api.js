@@ -281,6 +281,28 @@ router.post('/api/topics/:id/close', async (req, res, params) => {
   sendJson(res, 200, db.getTopic(params.id));
 });
 
+// Overwrite the topic-level "current summary" — the main session's
+// consolidated state for a next-up reader. Distinct from seq-based
+// topic_messages (accumulative) — this one is overwritten each call.
+router.put('/api/topics/:id/summary', async (req, res, params) => {
+  const body = await readJsonBody(req);
+  if (body.content == null) {
+    return sendError(res, 400, 'missing_field', 'content required');
+  }
+  try {
+    const topic = db.setTopicSummary(params.id, {
+      content: body.content,
+      author: body.author ?? null,
+    });
+    sendJson(res, 200, topic);
+  } catch (e) {
+    if (/topic not found/.test(e.message)) {
+      return sendError(res, 404, 'not_found', e.message);
+    }
+    throw e;
+  }
+});
+
 // GET /api/topics/:id — must be LAST among /api/topics/:id*
 router.get('/api/topics/:id', async (req, res, params, query) => {
   const topic = db.getTopic(params.id);

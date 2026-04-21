@@ -139,6 +139,121 @@ function runDaoTests() {
     assert.strictEqual(db.closeTopic('t-nope'), false);
   });
 
+  // ── topic current_summary (topic-set-summary feature) ──────────
+  step('setTopicSummary writes three columns + bumps updated_at', () => {
+    const t = db.createTopic({ title: 'summary target' });
+    const before = db.getTopic(t.id).updated_at;
+    // Wait 2ms to make timestamp comparison meaningful
+    const result = db.setTopicSummary(t.id, {
+      content: 'v1 summary text', author: 'main-scene',
+    });
+    assert.strictEqual(result.current_summary, 'v1 summary text');
+    assert.strictEqual(result.current_summary_updated_by, 'main-scene');
+    assert(typeof result.current_summary_updated_at === 'number');
+    assert(result.updated_at >= before, 'topics.updated_at should be bumped');
+  });
+
+  step('setTopicSummary overwrites previous summary (no history)', () => {
+    const t = db.createTopic({ title: 'overwrite target' });
+    db.setTopicSummary(t.id, { content: 'v1', author: 'a' });
+    db.setTopicSummary(t.id, { content: 'v2', author: 'b' });
+    const row = db.getTopic(t.id);
+    assert.strictEqual(row.current_summary, 'v2');
+    assert.strictEqual(row.current_summary_updated_by, 'b');
+  });
+
+  step('setTopicSummary accepts null author', () => {
+    const t = db.createTopic({ title: 'null author' });
+    db.setTopicSummary(t.id, { content: 'anon summary' });
+    const row = db.getTopic(t.id);
+    assert.strictEqual(row.current_summary, 'anon summary');
+    assert.strictEqual(row.current_summary_updated_by, null);
+  });
+
+  step('setTopicSummary throws on unknown topic', () => {
+    assert.throws(
+      () => db.setTopicSummary('t-nope', { content: 'x' }),
+      /topic not found/
+    );
+  });
+
+  step('setTopicSummary: historical ts does NOT pull topics.updated_at back', () => {
+    // Reviewer P5 🟡 fix: `ts` override must only affect
+    // current_summary_updated_at; topics.updated_at must always reflect
+    // wall-clock now, otherwise bulk-imported old summaries would sink
+    // below `topic-list --recent=...` filters.
+    const t = db.createTopic({ title: 'ts-override target' });
+    const before = Date.now();
+    const historicalTs = before - 7 * 24 * 60 * 60 * 1000; // one week ago
+    db.setTopicSummary(t.id, {
+      content: 'imported from a week ago',
+      author: 'bulk-import',
+      ts: historicalTs,
+    });
+    const row = db.getTopic(t.id);
+    assert.strictEqual(row.current_summary_updated_at, historicalTs,
+      'content timestamp should honor ts override');
+    assert(row.updated_at >= before,
+      `topics.updated_at must be now, not historical (got ${row.updated_at}, want >= ${before})`);
+  });
+
+  step('setTopicSummary rejects missing content', () => {
+    const t = db.createTopic({ title: 'require content' });
+    assert.throws(
+      () => db.setTopicSummary(t.id, {}),
+      /content required/
+    );
+  });
+
+  step('getTopic returns current_summary fields (null when never set)', () => {
+    const t = db.createTopic({ title: 'never set summary' });
+    const row = db.getTopic(t.id);
+    assert.strictEqual(row.current_summary, null);
+    assert.strictEqual(row.current_summary_updated_at, null);
+    assert.strictEqual(row.current_summary_updated_by, null);
+  });
+
+  step('migration: ALTER TABLE idempotent on existing DB (simulate pre-migration)', () => {
+    // Simulate a DB from before the summary columns existed: build a temp
+    // DB with the OLD schema, then re-init() to run addColumnIfMissing.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minitor-migrate-'));
+    const tmpFile = path.join(tmpDir, 'pre-migration.db');
+    const Database = require('better-sqlite3');
+    const raw = new Database(tmpFile);
+    raw.exec(`CREATE TABLE topics (
+      id TEXT PRIMARY KEY, title TEXT, status TEXT DEFAULT 'active',
+      created_at INTEGER, updated_at INTEGER
+    )`);
+    raw.prepare(`INSERT INTO topics (id, title, status, created_at, updated_at)
+                 VALUES (?, ?, 'active', ?, ?)`)
+      .run('t-premig01', 'before migration', Date.now(), Date.now());
+    raw.close();
+
+    // Now init() through db.js on the same file — migration should add
+    // the three summary columns without touching the existing row
+    db.close();
+    db.init(tmpFile);
+    const existing = db.getTopic('t-premig01');
+    assert(existing, 'pre-migration row should survive');
+    assert.strictEqual(existing.current_summary, null);
+    // And setTopicSummary should work on it
+    db.setTopicSummary('t-premig01', { content: 'post-migration set', author: 'mig-test' });
+    const after = db.getTopic('t-premig01');
+    assert.strictEqual(after.current_summary, 'post-migration set');
+    assert.strictEqual(after.current_summary_updated_by, 'mig-test');
+
+    // Re-init on the same file: ALTER should skip (idempotent)
+    db.close();
+    db.init(tmpFile); // would throw "duplicate column" if migration weren't guarded
+    assert(db.getTopic('t-premig01'));
+
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+
+    // Reopen the original test DB so later steps still work
+    db.init(file);
+  });
+
   // ── Phase 7: transcripts / file_ops / summaries ─────────────────
   step('insertTranscript auto-increments seq + role enforcement', () => {
     const a = db.insertTranscript({

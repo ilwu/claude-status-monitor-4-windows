@@ -202,6 +202,90 @@ async function runTests() {
     assert.match(r.stdout, /CLI smoke/);
   });
 
+  // ── topic-set-summary + topic-show summary block ───────────────
+  await step('topic-set-summary → ok + topic-show prints 📌 Summary block', async () => {
+    const create = await spawnMmsg(['topic-new', '--title=summary showcase']);
+    const sumTopic = create.stdout.trim();
+
+    // topic-show before set: no Summary block
+    const before = await spawnMmsg(['topic-show', sumTopic]);
+    assert.doesNotMatch(before.stdout, /📌 Summary/);
+
+    // set summary
+    const setR = await spawnMmsg(
+      ['topic-set-summary', sumTopic, '--author=main-scene'],
+      { stdin: 'consolidated state line 1\nline 2 extra detail' }
+    );
+    assert.strictEqual(setR.code, 0, setR.stderr);
+    assert.match(setR.stdout, /ok updated=/);
+    assert.match(setR.stdout, /by=main-scene/);
+
+    // topic-show after set: Summary block shows between metadata and seq=1
+    const after = await spawnMmsg(['topic-show', sumTopic]);
+    assert.match(after.stdout, /📌 Summary \(updated .+ by main-scene\):/);
+    assert.match(after.stdout, /consolidated state line 1/);
+    assert.match(after.stdout, /line 2 extra detail/);
+    // Summary must appear before the structural --- divider.
+    // Use lastIndexOf and a newline-anchored pattern so summary content
+    // that itself contains `---` (Markdown horizontal rule, plausible in
+    // real summaries) doesn't fool the assertion. The structural divider
+    // is the last `\n---\n` before the messages.
+    const sumIdx = after.stdout.indexOf('📌 Summary');
+    const divMatch = after.stdout.match(/\n---\n/g);
+    const divIdx = after.stdout.lastIndexOf('\n---\n');
+    assert(sumIdx > 0, `Summary block missing (stdout: ${after.stdout})`);
+    assert(divIdx > sumIdx,
+      `Summary must precede the structural divider (sum@${sumIdx} div@${divIdx}; found ${divMatch?.length || 0} dividers)`);
+  });
+
+  await step('topic-set-summary overwrites (no history)', async () => {
+    const create = await spawnMmsg(['topic-new', '--title=overwrite-test']);
+    const id = create.stdout.trim();
+    await spawnMmsg(['topic-set-summary', id, '--author=a'], { stdin: 'v1 text' });
+    await spawnMmsg(['topic-set-summary', id, '--author=b'], { stdin: 'v2 newer' });
+    const r = await spawnMmsg(['topic-show', id]);
+    assert.match(r.stdout, /v2 newer/);
+    assert.doesNotMatch(r.stdout, /v1 text/, 'v1 should be gone after overwrite');
+    assert.match(r.stdout, /by b/);
+  });
+
+  await step('topic-set-summary no stdin → exit 2', async () => {
+    const create = await spawnMmsg(['topic-new', '--title=no-stdin']);
+    const id = create.stdout.trim();
+    const r = await spawnMmsg(['topic-set-summary', id]);
+    assert.strictEqual(r.code, 2);
+    assert.match(r.stderr, /no content on stdin/);
+  });
+
+  await step('topic-set-summary no id → exit 2', async () => {
+    const r = await spawnMmsg(['topic-set-summary'], { stdin: 'content' });
+    assert.strictEqual(r.code, 2);
+  });
+
+  await step('topic-set-summary unknown topic → exit 1', async () => {
+    const r = await spawnMmsg(
+      ['topic-set-summary', 't-nosuch'],
+      { stdin: 'content' }
+    );
+    assert.strictEqual(r.code, 1);
+    assert.match(r.stderr, /topic not found/);
+  });
+
+  await step('topic-set-summary no author → by=- in output', async () => {
+    const create = await spawnMmsg(['topic-new', '--title=no-author']);
+    const id = create.stdout.trim();
+    const r = await spawnMmsg(
+      ['topic-set-summary', id],
+      { stdin: 'anon content' }
+    );
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.match(r.stdout, /by=-/);
+    const show = await spawnMmsg(['topic-show', id]);
+    // topic-show handles null author by omitting the "by" fragment
+    assert.match(show.stdout, /📌 Summary \(updated [^)]+\):/);
+    assert.doesNotMatch(show.stdout, /by \w/, 'no "by X" when author is null');
+  });
+
   await step('topic-list --status=active → filters', async () => {
     const r = await spawnMmsg(['topic-list', '--status=active']);
     assert.strictEqual(r.code, 0, r.stderr);
