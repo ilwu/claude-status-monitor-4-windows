@@ -332,7 +332,96 @@ P7 i18n
 P7.5 使用者瀏覽器驗證
 P8 code-reviewer 第二輪（整合）
 P9 commit
+P10 ★ 任務 Summary 固化（§七之三）
 ```
+
+---
+
+## 七之三、任務 Summary 固化（降低接手成本，2026-04-21 新增）
+
+**背景**：主 session ctx 40%+ 後接手成本高（讀每個 sub-session 的 60KB+ topic thread），成為 pain point。
+
+**結論**：Sub-session 在任務完成 / ctx 將耗盡時寫 **AI-readable summary**，經主場景 review 後寫入 design 文件 + topic `currentSummary` 欄位。下次接手 session 讀 summary 取代讀整個 thread，ctx 成本 20x+ 改善。
+
+### 時機
+
+- **任務整個完成時**（P9 commit 結束後的 P10）：完整 summary 固化全歷程
+- **sub-session ctx 接近上限要交接時**：保 80%+ 進度在 summary，給接力的 sub-session 無痛接手
+
+### 流程（review-before-write）
+
+```
+sub-session                           主場景
+─────────                           ─────────
+[任務完成或 ctx 交接]
+  │
+  ├─ 寫 summary 草稿（AI-readable）
+  │
+  └─ mmsg topic-add 提交審核 ───→   收到草稿
+                                        │
+                                        ├─ 換位思考「全新接手 session 看得懂嗎？」
+                                        ├─ 補充必要資訊
+                                        │
+                                        ├─ 寫入 design 文件最下方
+                                        │
+                                        ├─ 搬 [→D 候選] 決策到 DECISIONS
+                                        │   （賦予 D 編號）
+                                        │
+                                        └─ 同步 topic currentSummary 欄位
+```
+
+### Summary 格式（必含段落）
+
+AI-readable，用縮寫連結（a1 / C2 / T3）減少 tokens，~1.5k tokens 量級。不求人類可讀，求 AI 接續清楚。
+
+```markdown
+# 實作歷程 Summary
+> AI-readable，<date>，<任務範圍 + 結果>
+> 給下個 session 接續用，不為人寫。
+
+## Phase 線
+- P1 xxx ✅（seq=3-5）/ P2 xxx ✅（修 C1）...
+
+## 決策 a1-aN（標 [→D 候選] 是否搬 DECISIONS）
+- a1 ... seq=X 主 session 拍
+- a2 ... seq=X 使用者拍 [→D 候選]
+
+## 偏離拍板 C1-CN
+- C1 設計文件 §X 錯，session 自修 + 主 session 追改 DESIGN
+
+## 技術關鍵 T1-TN（接手要知道但不在 DESIGN）
+- T1 ...
+
+## Commits
+- hash 1 feat(xxx): 摘要（N 檔）
+
+## 未完（→後續發包）
+- xxx → TODO-X
+```
+
+### 寫入位置
+
+- **Design 文件最下方**（Platform-BackendServer/docs/audit/... 或 docs/func-design/...）
+- **topic currentSummary 欄位**（API 見 `mmsg topic-set-summary`；上線前用 📌 格式 mmsg 訊息變通）
+
+### PLAN.md 的新角色
+
+任務詳細歷程從 PLAN.md 抽離。**PLAN 只記「任務進行狀態」起始/結束**（✅/🔨/⬜/🟡），細節去該任務 design 文件的 summary 讀。
+
+### 主場景接手動作（下個 session 用）
+
+依序讀：
+1. PLAN.md（看任務狀態）
+2. DECISIONS.md（含 session 期間新 D 編號）
+3. 該任務 design 文件底部 summary（**取代讀整個 topic thread**）
+4. mmsg `topic-show <id>` 看 currentSummary + `--latest=3` 對齊最近訊息
+
+### 反例
+
+- ❌ Sub-session 不寫 summary 就交接 → 下個 session 要重讀整份 thread，ctx 重複燒
+- ❌ summary 寫成「人類可讀」長篇 → 無益 AI 且消耗 token
+- ❌ summary 只寫結果不寫拍板脈絡 → 新 session 踩同坑
+- ❌ 主場景不 review 直接寫 design → sub-session 視角偏，缺脈絡
 
 ---
 
@@ -390,6 +479,16 @@ P9 commit
 - 案例 2：Deposit 整合 A3 延後方向拍錯（忘了使用者「兩週上線」前提）
 - 對策：§3.1 主 session 拍板三原則（對照實作 / 對照前提 / 業務上推）
 - 救援：發現拍錯即刻撤回，明白標「撤回 seq=N」— 比硬著頭皮走下去便宜
+
+### 8.11 多 session Commit 交錯（2026-04-20 實證）
+- 症狀：兩 session 並行推進同 repo，commit 階段交錯製造 HEAD 異常
+- 案例：`29b81caa` / `27b99410` / `2f41d43f` / `b43da739` — admin-2614 session 和 credit-point session 同日 commit，credit-point 模組檔案在某個中間 commit 被 shadowed，需額外一筆補齊；使用者親自介入協調才解困
+- 根因：即使 pathspec 規則明寫，sub-session 仍可能廣義 add；多 session 交錯 commit 即使 pathspec 正確也難追蹤順序
+- 對策 1（序列化）：**commit 嚴格序列化** — 同 repo 一次只有一個 session 在 commit
+- 對策 2（主場景責任）：sub-session 進 commit Phase 前，主場景**先對使用者 4 段回報顯眼標示「下一 Phase=commit，需協調順序」**
+- 對策 3（sub-session 責任）：收到 commit Phase 放行前**等主場景明確指示** — 不自推進
+- 對策 4（工具）：`git-guard-hook.sh` dirty tree 硬擋 + 加廣義 add 警告（參照 §8.9）
+- 跨 repo（例：platform-website vs Platform-BackendServer）並行 commit 較安全但仍建議序列化
 
 ---
 
